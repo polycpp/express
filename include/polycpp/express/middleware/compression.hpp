@@ -1,0 +1,338 @@
+#pragma once
+
+/**
+ * @file middleware/compression.hpp
+ * @brief Compression middleware for Express responses.
+ *
+ * C++ port of npm compression (https://github.com/expressjs/compression).
+ * Compresses response bodies using gzip, deflate, or brotli based on
+ * the client's Accept-Encoding header.
+ *
+ * The middleware sets compression metadata on `res.locals` so that
+ * `Response::send()` can compress the body before writing.
+ *
+ * @par Example
+ * @code{.cpp}
+ *   #include <polycpp/express/express.hpp>
+ *
+ *   auto app = express();
+ *
+ *   // Enable compression with defaults
+ *   app.use(express::compress());
+ *
+ *   // Enable compression with custom options
+ *   app.use(express::compress({.threshold = 512, .level = 6}));
+ * @endcode
+ *
+ * @see https://www.npmjs.com/package/compression
+ * @see https://github.com/expressjs/compression
+ * @since 0.1.0
+ */
+
+#include <algorithm>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <polycpp/buffer.hpp>
+#include <polycpp/core/json.hpp>
+#include <polycpp/zlib/zlib.hpp>
+
+#include <polycpp/express/types.hpp>
+#include <polycpp/express/request.hpp>
+#include <polycpp/express/response.hpp>
+
+namespace polycpp {
+namespace express {
+
+// ══════════════════════════════════════════════════════════════════════
+// CompressionOptions
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Configuration options for the compression middleware.
+ *
+ * Mirrors the npm `compression` package options object.
+ *
+ * | Option    | Type                   | Default                               |
+ * |-----------|------------------------|---------------------------------------|
+ * | level     | int                    | -1 (zlib default)                     |
+ * | threshold | int                    | 1024 (bytes)                          |
+ * | filter    | vector<string>         | (empty = use default compressible types) |
+ *
+ * @see https://github.com/expressjs/compression#options
+ * @since 0.1.0
+ */
+struct CompressionOptions {
+    /**
+     * @brief Compression level (-1 = default, 0 = none, 9 = best).
+     *
+     * Passed to zlib/brotli as the compression level.
+     * -1 uses the default level for the chosen algorithm.
+     *
+     * @since 0.1.0
+     */
+    int level = -1;
+
+    /**
+     * @brief Minimum response body size in bytes to compress.
+     *
+     * Responses smaller than this threshold are sent uncompressed.
+     * Default is 1024 bytes (matching npm compression's default).
+     *
+     * @since 0.1.0
+     */
+    int threshold = 1024;
+
+    /**
+     * @brief Content types to compress.
+     *
+     * When empty (default), the middleware compresses types that are
+     * generally considered compressible: text/*, application/json,
+     * application/javascript, application/xml, and
+     * application/x-www-form-urlencoded.
+     *
+     * When non-empty, only content types matching one of the filter
+     * entries are compressed. Entries can be exact types (e.g.,
+     * "application/json") or wildcard prefixes (e.g., "text/").
+     *
+     * @since 0.1.0
+     */
+    std::vector<std::string> filter;
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// Internal helpers
+// ══════════════════════════════════════════════════════════════════════
+
+namespace detail {
+
+/**
+ * @brief Check whether a content type should be compressed.
+ *
+ * @param contentType The Content-Type header value.
+ * @param filter User-provided filter list. If empty, uses defaults.
+ * @return True if the content type is compressible.
+ * @since 0.1.0
+ */
+inline bool shouldCompress(const std::string& contentType,
+                           const std::vector<std::string>& filter) {
+    if (contentType.empty()) return false;
+
+    // Extract the MIME type (strip charset and parameters)
+    std::string mimeType = contentType;
+    auto semicolon = mimeType.find(';');
+    if (semicolon != std::string::npos) {
+        mimeType = mimeType.substr(0, semicolon);
+    }
+    // Trim whitespace
+    while (!mimeType.empty() && mimeType.back() == ' ') mimeType.pop_back();
+
+    // Lowercase for comparison
+    std::string lower = mimeType;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    if (!filter.empty()) {
+        for (const auto& entry : filter) {
+            std::string lowerEntry = entry;
+            std::transform(lowerEntry.begin(), lowerEntry.end(),
+                           lowerEntry.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+
+            // Wildcard prefix: "text/" matches "text/html", "text/plain", etc.
+            if (!lowerEntry.empty() && lowerEntry.back() == '/') {
+                if (lower.substr(0, lowerEntry.size()) == lowerEntry) {
+                    return true;
+                }
+            }
+            // Exact match or prefix match (e.g., "text/*")
+            else if (lowerEntry.size() >= 2 &&
+                     lowerEntry.substr(lowerEntry.size() - 2) == "/*") {
+                auto prefix = lowerEntry.substr(0, lowerEntry.size() - 1);
+                if (lower.substr(0, prefix.size()) == prefix) {
+                    return true;
+                }
+            }
+            // Exact match
+            else if (lower == lowerEntry) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Default compressible types
+    // Compress: text/*, application/json, application/javascript,
+    //           application/xml, application/x-www-form-urlencoded,
+    //           application/xhtml+xml, application/rss+xml,
+    //           application/atom+xml, image/svg+xml
+    // Don't compress: image/* (except svg+xml), audio/*, video/*,
+    //                 application/octet-stream, application/zip,
+    //                 application/pdf, application/gzip
+
+    if (lower.substr(0, 5) == "text/") return true;
+
+    if (lower == "application/json") return true;
+    if (lower == "application/javascript") return true;
+    if (lower == "application/x-javascript") return true;
+    if (lower == "application/xml") return true;
+    if (lower == "application/xhtml+xml") return true;
+    if (lower == "application/rss+xml") return true;
+    if (lower == "application/atom+xml") return true;
+    if (lower == "application/x-www-form-urlencoded") return true;
+    if (lower == "image/svg+xml") return true;
+
+    return false;
+}
+
+/**
+ * @brief Negotiate the best encoding from Accept-Encoding header.
+ *
+ * Parses the Accept-Encoding header and returns the preferred encoding
+ * that we support, in order of preference: br, gzip, deflate.
+ *
+ * @param acceptEncoding The Accept-Encoding header value.
+ * @return The chosen encoding ("br", "gzip", "deflate"), or empty string
+ *         if no supported encoding is accepted.
+ * @since 0.1.0
+ */
+inline std::string negotiateEncoding(const std::string& acceptEncoding) {
+    if (acceptEncoding.empty()) return "";
+
+    // Lowercase for comparison
+    std::string lower = acceptEncoding;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    // Check for "identity;q=0" or "*;q=0" which means client rejects
+    // everything -- but this is rare and complex; keep it simple.
+
+    // Prefer brotli > gzip > deflate (matching npm compression behavior)
+    // Simple substring matching is sufficient for most real-world cases.
+    bool hasBr = lower.find("br") != std::string::npos;
+    bool hasGzip = lower.find("gzip") != std::string::npos;
+    bool hasDeflate = lower.find("deflate") != std::string::npos;
+
+    // Check for wildcard
+    bool hasWildcard = lower.find('*') != std::string::npos;
+
+    if (hasBr) return "br";
+    if (hasGzip) return "gzip";
+    if (hasDeflate) return "deflate";
+    if (hasWildcard) return "gzip";  // Default to gzip for wildcard
+
+    return "";
+}
+
+/**
+ * @brief Compress a body string using the specified encoding.
+ *
+ * @param body The uncompressed body.
+ * @param encoding The encoding to use ("gzip", "deflate", or "br").
+ * @param level The compression level (-1 for default).
+ * @return The compressed body as a string, or std::nullopt on failure.
+ * @since 0.1.0
+ */
+inline std::optional<std::string> compressBody(const std::string& body,
+                                               const std::string& encoding,
+                                               int level) {
+    try {
+        Buffer input = Buffer::from(body);
+        Buffer compressed;
+
+        if (encoding == "gzip") {
+            zlib::Options opts;
+            if (level >= 0) opts.level = level;
+            compressed = zlib::gzipSync(input, opts);
+        } else if (encoding == "deflate") {
+            zlib::Options opts;
+            if (level >= 0) opts.level = level;
+            compressed = zlib::deflateSync(input, opts);
+        } else if (encoding == "br") {
+            zlib::BrotliOptions opts;
+            if (level >= 0) {
+                opts.params[BROTLI_PARAM_QUALITY] = level;
+            }
+            compressed = zlib::brotliCompressSync(input, opts);
+        } else {
+            return std::nullopt;
+        }
+
+        return compressed.toString("latin1");
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+} // namespace detail
+
+// ══════════════════════════════════════════════════════════════════════
+// compress() factory
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Create a compression middleware handler.
+ *
+ * Returns a MiddlewareHandler that negotiates content encoding and stores
+ * compression parameters in `res.locals` for `Response::send()` to apply.
+ *
+ * The middleware:
+ * 1. Checks the Accept-Encoding request header.
+ * 2. Negotiates the best encoding (br > gzip > deflate).
+ * 3. Adds `Vary: Accept-Encoding` to the response.
+ * 4. Stores encoding info in `res.locals` for send() to use.
+ *
+ * @param opts Compression configuration options.
+ * @return A MiddlewareHandler suitable for app.use().
+ *
+ * @par Example
+ * @code{.cpp}
+ *   // Default compression
+ *   app.use(compress());
+ *
+ *   // Custom threshold
+ *   app.use(compress({.threshold = 0}));  // Compress everything
+ *
+ *   // Custom level
+ *   app.use(compress({.level = 6}));
+ * @endcode
+ *
+ * @see https://github.com/expressjs/compression
+ * @since 0.1.0
+ */
+inline MiddlewareHandler compressionMiddleware(const CompressionOptions& opts = {}) {
+    return [opts](Request& req, Response& res, NextFunction next) {
+        // 1. Check Accept-Encoding header
+        auto acceptEncoding = req.get("accept-encoding").value_or("");
+
+        // 2. Negotiate encoding
+        auto encoding = detail::negotiateEncoding(acceptEncoding);
+
+        // 3. Always add Vary: Accept-Encoding (even if not compressing)
+        res.vary("Accept-Encoding");
+
+        if (encoding.empty()) {
+            // Client doesn't accept any supported encoding
+            next({});
+            return;
+        }
+
+        // 4. Store compression parameters in res.locals for send() to use
+        res.locals.asObject()["_compression_encoding"] = encoding;
+        res.locals.asObject()["_compression_threshold"] = static_cast<double>(opts.threshold);
+        res.locals.asObject()["_compression_level"] = static_cast<double>(opts.level);
+
+        // Store the filter as a JSON array for send() to reference
+        JsonArray filterArr;
+        for (const auto& f : opts.filter) {
+            filterArr.push_back(f);
+        }
+        res.locals.asObject()["_compression_filter"] = filterArr;
+
+        next({});
+    };
+}
+
+} // namespace express
+} // namespace polycpp

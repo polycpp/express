@@ -24,6 +24,7 @@
 #include <polycpp/http.hpp>
 #include <polycpp/mime/mime.hpp>
 #include <polycpp/path.hpp>
+#include <polycpp/zlib/zlib.hpp>
 
 #include <polycpp/express/types.hpp>
 #include <polycpp/express/http_error.hpp>
@@ -112,10 +113,7 @@ public:
             raw_.setHeader("Content-Type", "text/html; charset=utf-8");
         }
 
-        // Set Content-Length
-        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
-
-        // Generate ETag if setting is enabled
+        // Generate ETag if setting is enabled (before compression)
         if (!raw_.hasHeader("ETag") && !body.empty()) {
             auto etag = detail::generateWeakETag(body);
             raw_.setHeader("ETag", etag);
@@ -128,11 +126,18 @@ public:
             return *this;
         }
 
+        // Try compression if compression middleware is active
+        auto compressed = applyCompression_(body);
+        const std::string& output = compressed ? *compressed : body;
+
+        // Set Content-Length (after compression, if applied)
+        raw_.setHeader("Content-Length", static_cast<int>(output.size()));
+
         // HEAD requests get no body
         if (req_ && req_->method() == "HEAD") {
             raw_.end();
         } else {
-            raw_.end(body);
+            raw_.end(output);
         }
         return *this;
     }
@@ -148,11 +153,18 @@ public:
         if (!raw_.hasHeader("Content-Type")) {
             raw_.setHeader("Content-Type", "application/octet-stream");
         }
-        raw_.setHeader("Content-Length", static_cast<int>(body.length()));
+
+        auto bodyStr = body.toString("latin1");
+
+        // Try compression if compression middleware is active
+        auto compressed = applyCompression_(bodyStr);
+        const std::string& output = compressed ? *compressed : bodyStr;
+
+        raw_.setHeader("Content-Length", static_cast<int>(output.size()));
         if (req_ && req_->method() == "HEAD") {
             raw_.end();
         } else {
-            raw_.end(body.toString());
+            raw_.end(output);
         }
         return *this;
     }
@@ -171,12 +183,17 @@ public:
         }
 
         auto body = JSON::stringify(obj);
-        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
+
+        // Try compression if compression middleware is active
+        auto compressed = applyCompression_(body);
+        const std::string& output = compressed ? *compressed : body;
+
+        raw_.setHeader("Content-Length", static_cast<int>(output.size()));
 
         if (req_ && req_->method() == "HEAD") {
             raw_.end();
         } else {
-            raw_.end(body);
+            raw_.end(output);
         }
         return *this;
     }
@@ -730,6 +747,175 @@ public:
     void setReq(Request* req) { req_ = req; }
 
 private:
+    /**
+     * @brief Apply compression to a response body if compression middleware is active.
+     *
+     * Checks `locals` for compression parameters set by the compression middleware.
+     * If compression is appropriate (body exceeds threshold, content type is
+     * compressible), compresses the body and sets Content-Encoding header.
+     *
+     * @param body The uncompressed response body.
+     * @return The compressed body, or std::nullopt if compression was not applied.
+     * @since 0.1.0
+     */
+    std::optional<std::string> applyCompression_(const std::string& body) {
+        // Check if compression middleware stored encoding info
+        if (!locals.isObject()) return std::nullopt;
+
+        auto& obj = locals.asObject();
+        auto encodingIt = obj.find("_compression_encoding");
+        if (encodingIt == obj.end() || !encodingIt->second.isString()) {
+            return std::nullopt;
+        }
+
+        auto encoding = encodingIt->second.asString();
+        if (encoding.empty()) return std::nullopt;
+
+        // Get threshold
+        int threshold = 1024;
+        auto threshIt = obj.find("_compression_threshold");
+        if (threshIt != obj.end() && threshIt->second.isNumber()) {
+            threshold = static_cast<int>(threshIt->second.asNumber());
+        }
+
+        // Check body size against threshold
+        if (static_cast<int>(body.size()) < threshold) {
+            return std::nullopt;
+        }
+
+        // Get Content-Type and check if it's compressible
+        auto contentType = raw_.getHeader("Content-Type");
+
+        // Build filter vector from locals
+        std::vector<std::string> filter;
+        auto filterIt = obj.find("_compression_filter");
+        if (filterIt != obj.end() && filterIt->second.isArray()) {
+            for (const auto& f : filterIt->second.asArray()) {
+                if (f.isString()) {
+                    filter.push_back(f.asString());
+                }
+            }
+        }
+
+        // Check if content type is compressible
+        if (!isCompressible_(contentType, filter)) {
+            return std::nullopt;
+        }
+
+        // Don't compress if Content-Encoding is already set
+        auto existingEncoding = raw_.getHeader("Content-Encoding");
+        if (!existingEncoding.empty()) {
+            return std::nullopt;
+        }
+
+        // Get compression level
+        int level = -1;
+        auto levelIt = obj.find("_compression_level");
+        if (levelIt != obj.end() && levelIt->second.isNumber()) {
+            level = static_cast<int>(levelIt->second.asNumber());
+        }
+
+        // Perform compression
+        try {
+            Buffer input = Buffer::from(body);
+            Buffer compressed;
+
+            if (encoding == "gzip") {
+                zlib::Options opts;
+                if (level >= 0) opts.level = level;
+                compressed = zlib::gzipSync(input, opts);
+            } else if (encoding == "deflate") {
+                zlib::Options opts;
+                if (level >= 0) opts.level = level;
+                compressed = zlib::deflateSync(input, opts);
+            } else if (encoding == "br") {
+                zlib::BrotliOptions opts;
+                if (level >= 0) {
+                    opts.params[BROTLI_PARAM_QUALITY] = level;
+                }
+                compressed = zlib::brotliCompressSync(input, opts);
+            } else {
+                return std::nullopt;
+            }
+
+            // Set Content-Encoding header
+            raw_.setHeader("Content-Encoding", encoding);
+
+            // Remove ETag since body has changed
+            // (Express's compression module does this)
+            raw_.removeHeader("ETag");
+
+            return compressed.toString("latin1");
+        } catch (...) {
+            // If compression fails, send uncompressed
+            return std::nullopt;
+        }
+    }
+
+    /**
+     * @brief Check whether a content type is compressible.
+     *
+     * @param contentType The Content-Type header value.
+     * @param filter User-provided filter list.
+     * @return True if the content type should be compressed.
+     * @since 0.1.0
+     */
+    static bool isCompressible_(const std::string& contentType,
+                                const std::vector<std::string>& filter) {
+        if (contentType.empty()) return false;
+
+        // Extract the MIME type (strip charset and parameters)
+        std::string mimeType = contentType;
+        auto semicolon = mimeType.find(';');
+        if (semicolon != std::string::npos) {
+            mimeType = mimeType.substr(0, semicolon);
+        }
+        while (!mimeType.empty() && mimeType.back() == ' ') mimeType.pop_back();
+
+        // Lowercase for comparison
+        std::string lower = mimeType;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        if (!filter.empty()) {
+            for (const auto& entry : filter) {
+                std::string lowerEntry = entry;
+                std::transform(lowerEntry.begin(), lowerEntry.end(),
+                               lowerEntry.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+
+                if (!lowerEntry.empty() && lowerEntry.back() == '/') {
+                    if (lower.substr(0, lowerEntry.size()) == lowerEntry) {
+                        return true;
+                    }
+                } else if (lowerEntry.size() >= 2 &&
+                           lowerEntry.substr(lowerEntry.size() - 2) == "/*") {
+                    auto prefix = lowerEntry.substr(0, lowerEntry.size() - 1);
+                    if (lower.substr(0, prefix.size()) == prefix) {
+                        return true;
+                    }
+                } else if (lower == lowerEntry) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Default compressible types
+        if (lower.substr(0, 5) == "text/") return true;
+        if (lower == "application/json") return true;
+        if (lower == "application/javascript") return true;
+        if (lower == "application/x-javascript") return true;
+        if (lower == "application/xml") return true;
+        if (lower == "application/xhtml+xml") return true;
+        if (lower == "application/rss+xml") return true;
+        if (lower == "application/atom+xml") return true;
+        if (lower == "application/x-www-form-urlencoded") return true;
+        if (lower == "image/svg+xml") return true;
+
+        return false;
+    }
+
     http::ServerResponse& raw_;
     Application* app_ = nullptr;
     Request* req_ = nullptr;

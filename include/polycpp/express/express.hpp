@@ -59,6 +59,7 @@
 
 // Built-in middleware
 #include <polycpp/express/middleware/body_parser.hpp>
+#include <polycpp/express/middleware/compression.hpp>
 #include <polycpp/express/middleware/cors.hpp>
 #include <polycpp/express/middleware/serve_static.hpp>
 
@@ -247,6 +248,25 @@ inline MiddlewareHandler raw(const RawParserOptions& opts = {}) {
  */
 inline MiddlewareHandler text(const TextParserOptions& opts = {}) {
     return textParser(opts);
+}
+
+/**
+ * @brief Create a compression middleware.
+ *
+ * @param opts Compression options.
+ * @return A middleware handler.
+ *
+ * @par Example
+ * @code{.cpp}
+ *   app.use(express::compress());
+ *   app.use(express::compress({.threshold = 0, .level = 6}));
+ * @endcode
+ *
+ * @see https://github.com/expressjs/compression
+ * @since 0.1.0
+ */
+inline MiddlewareHandler compress(const CompressionOptions& opts = {}) {
+    return compressionMiddleware(opts);
 }
 
 /**
