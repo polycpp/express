@@ -1,0 +1,45 @@
+# Build directories
+build/
+build-*/
+build_*/
+cmake-build-*/
+
+# Working documents (never committed)
+/internal/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled objects
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Testing artifacts
+Testing/
+CTestTestfile.cmake
+
+# Package managers / FetchContent
+_deps/
+
+# AI agent files
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# Worktrees
+.worktrees/

@@ -1,0 +1,740 @@
+#pragma once
+
+/**
+ * @file response.hpp
+ * @brief Response class -- wraps http::ServerResponse with Express features.
+ *
+ * Provides send, json, redirect, cookie, sendFile, and other Express.js
+ * response methods.
+ *
+ * @see https://expressjs.com/en/api.html#res
+ * @since 0.1.0
+ */
+
+#include <algorithm>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <polycpp/buffer.hpp>
+#include <polycpp/core/json.hpp>
+#include <polycpp/cookie/cookie.hpp>
+#include <polycpp/fs.hpp>
+#include <polycpp/http.hpp>
+#include <polycpp/mime/mime.hpp>
+#include <polycpp/path.hpp>
+
+#include <polycpp/express/types.hpp>
+#include <polycpp/express/http_error.hpp>
+#include <polycpp/express/detail/utils.hpp>
+
+namespace polycpp {
+namespace express {
+
+/**
+ * @brief Express response object wrapping http::ServerResponse.
+ *
+ * Adds Express.js-style methods on top of the raw HTTP server response:
+ * send, json, redirect, cookie, type, links, sendFile, and more.
+ *
+ * All setters return a reference for method chaining.
+ *
+ * @see https://expressjs.com/en/api.html#res
+ * @since 0.1.0
+ */
+class Response {
+public:
+    /**
+     * @brief Construct a Response wrapping a ServerResponse.
+     *
+     * @param raw The raw HTTP server response.
+     * @param app Pointer to the Express application.
+     * @since 0.1.0
+     */
+    Response(http::ServerResponse& raw, Application* app)
+        : raw_(raw), app_(app) {}
+
+    // ── Per-response template variables ──────────────────────────────
+
+    /**
+     * @brief Local variables for template rendering.
+     * @since 0.1.0
+     */
+    JsonValue locals = JsonObject{};
+
+    // ── Status ───────────────────────────────────────────────────────
+
+    /**
+     * @brief Set the HTTP status code.
+     *
+     * @param code The status code.
+     * @return Reference to this Response for chaining.
+     *
+     * @par Example
+     * @code{.cpp}
+     *   res.status(404).send("Not Found");
+     * @endcode
+     *
+     * @since 0.1.0
+     */
+    Response& status(int code) {
+        raw_.status(code);
+        return *this;
+    }
+
+    /**
+     * @brief Get the current status code.
+     * @return The status code.
+     * @since 0.1.0
+     */
+    int statusCode() const {
+        // Default to 200 if not explicitly set
+        return statusCode_ > 0 ? statusCode_ : 200;
+    }
+
+    // ── Send Response ────────────────────────────────────────────────
+
+    /**
+     * @brief Send a string response.
+     *
+     * Sets Content-Type to text/html if not already set, generates ETag,
+     * checks freshness, and sends the body.
+     *
+     * @param body The response body string.
+     * @return Reference to this Response.
+     *
+     * @since 0.1.0
+     */
+    Response& send(const std::string& body) {
+        // Set Content-Type if not already set
+        if (!raw_.hasHeader("Content-Type")) {
+            raw_.setHeader("Content-Type", "text/html; charset=utf-8");
+        }
+
+        // Set Content-Length
+        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
+
+        // Generate ETag if setting is enabled
+        if (!raw_.hasHeader("ETag") && !body.empty()) {
+            auto etag = detail::generateWeakETag(body);
+            raw_.setHeader("ETag", etag);
+        }
+
+        // Check freshness for GET/HEAD
+        if (req_ && req_->fresh()) {
+            raw_.status(304);
+            raw_.end();
+            return *this;
+        }
+
+        // HEAD requests get no body
+        if (req_ && req_->method() == "HEAD") {
+            raw_.end();
+        } else {
+            raw_.end(body);
+        }
+        return *this;
+    }
+
+    /**
+     * @brief Send a Buffer response.
+     *
+     * @param body The response body as a Buffer.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& send(const Buffer& body) {
+        if (!raw_.hasHeader("Content-Type")) {
+            raw_.setHeader("Content-Type", "application/octet-stream");
+        }
+        raw_.setHeader("Content-Length", static_cast<int>(body.length()));
+        if (req_ && req_->method() == "HEAD") {
+            raw_.end();
+        } else {
+            raw_.end(body.toString());
+        }
+        return *this;
+    }
+
+    /**
+     * @brief Send a JSON response (auto-converts JsonValue to JSON string).
+     *
+     * @param obj The object to serialize as JSON.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& json(const JsonValue& obj) {
+        // Set Content-Type
+        if (!raw_.hasHeader("Content-Type")) {
+            raw_.setHeader("Content-Type", "application/json; charset=utf-8");
+        }
+
+        auto body = JSON::stringify(obj);
+        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
+
+        if (req_ && req_->method() == "HEAD") {
+            raw_.end();
+        } else {
+            raw_.end(body);
+        }
+        return *this;
+    }
+
+    /**
+     * @brief Send a JSONP response.
+     *
+     * @param obj The object to serialize.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& jsonp(const JsonValue& obj) {
+        auto body = JSON::stringify(obj);
+
+        // Get callback name from query
+        std::string callback;
+        if (req_) {
+            auto q = req_->query();
+            if (q.isObject()) {
+                auto it = q.asObject().find("callback");
+                if (it != q.asObject().end() && it->second.isString()) {
+                    callback = it->second.asString();
+                }
+            }
+        }
+
+        if (!callback.empty()) {
+            raw_.setHeader("Content-Type", "text/javascript; charset=utf-8");
+            raw_.setHeader("X-Content-Type-Options", "nosniff");
+            // Sanitize callback
+            body = "/**/ typeof " + callback + " === 'function' && " + callback + "(" + body + ");";
+        } else {
+            raw_.setHeader("Content-Type", "application/json; charset=utf-8");
+        }
+
+        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
+        raw_.end(body);
+        return *this;
+    }
+
+    /**
+     * @brief Send a status code with the default message.
+     *
+     * @param code The status code.
+     * @return Reference to this Response.
+     *
+     * @par Example
+     * @code{.cpp}
+     *   res.sendStatus(404);  // Sends "Not Found"
+     * @endcode
+     *
+     * @since 0.1.0
+     */
+    Response& sendStatus(int code) {
+        const auto& codes = http::STATUS_CODES();
+        auto it = codes.find(code);
+        std::string msg = (it != codes.end()) ? it->second : std::to_string(code);
+        status(code);
+        raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
+        raw_.setHeader("Content-Length", static_cast<int>(msg.size()));
+        raw_.end(msg);
+        return *this;
+    }
+
+    // ── Headers ──────────────────────────────────────────────────────
+
+    /**
+     * @brief Set a response header.
+     *
+     * @param field The header name.
+     * @param value The header value.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& set(const std::string& field, const std::string& value) {
+        raw_.setHeader(field, value);
+        return *this;
+    }
+
+    /**
+     * @brief Set multiple response headers.
+     * @param fields Map of header name-value pairs.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& set(const std::map<std::string, std::string>& fields) {
+        for (const auto& [key, val] : fields) {
+            raw_.setHeader(key, val);
+        }
+        return *this;
+    }
+
+    /**
+     * @brief Alias for set().
+     * @since 0.1.0
+     */
+    Response& header(const std::string& field, const std::string& value) {
+        return set(field, value);
+    }
+
+    /**
+     * @brief Get a response header value.
+     * @param field The header name.
+     * @return The header value, or std::nullopt if not set.
+     * @since 0.1.0
+     */
+    std::optional<std::string> get(const std::string& field) const {
+        auto val = raw_.getHeader(field);
+        if (val.empty()) return std::nullopt;
+        return val;
+    }
+
+    /**
+     * @brief Append a value to a response header.
+     *
+     * If the header already exists, the value is appended with a comma.
+     *
+     * @param field The header name.
+     * @param value The value to append.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& append(const std::string& field, const std::string& value) {
+        auto existing = raw_.getHeader(field);
+        if (existing.empty()) {
+            raw_.setHeader(field, value);
+        } else {
+            raw_.setHeader(field, existing + ", " + value);
+        }
+        return *this;
+    }
+
+    /**
+     * @brief Add a field to the Vary header.
+     *
+     * @param field The Vary field to add.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& vary(const std::string& field) {
+        detail::varyAppend(raw_, field);
+        return *this;
+    }
+
+    // ── Content Type ─────────────────────────────────────────────────
+
+    /**
+     * @brief Set the Content-Type header.
+     *
+     * If the type contains "/", it is used directly. Otherwise, it is
+     * looked up in the MIME type database.
+     *
+     * @param typeStr The content type or file extension.
+     * @return Reference to this Response.
+     *
+     * @par Example
+     * @code{.cpp}
+     *   res.type("json");         // "application/json"
+     *   res.type("text/html");    // "text/html"
+     *   res.type(".png");         // "image/png"
+     * @endcode
+     *
+     * @since 0.1.0
+     */
+    Response& type(const std::string& typeStr) {
+        std::string ct;
+        if (typeStr.find('/') != std::string::npos) {
+            ct = typeStr;
+        } else {
+            auto lookup = mime::contentType(typeStr);
+            ct = lookup.value_or(typeStr);
+        }
+        raw_.setHeader("Content-Type", ct);
+        return *this;
+    }
+
+    /**
+     * @brief Alias for type().
+     * @since 0.1.0
+     */
+    Response& contentType(const std::string& typeStr) {
+        return type(typeStr);
+    }
+
+    // ── Links ────────────────────────────────────────────────────────
+
+    /**
+     * @brief Set the Link header.
+     *
+     * @param links Map of rel -> href pairs.
+     * @return Reference to this Response.
+     *
+     * @par Example
+     * @code{.cpp}
+     *   res.links({{"next", "/users?page=2"}, {"last", "/users?page=5"}});
+     * @endcode
+     *
+     * @since 0.1.0
+     */
+    Response& links(const std::map<std::string, std::string>& linksMap) {
+        std::string header;
+        for (const auto& [rel, href] : linksMap) {
+            if (!header.empty()) header += ", ";
+            header += "<" + href + ">; rel=\"" + rel + "\"";
+        }
+        auto existing = raw_.getHeader("Link");
+        if (!existing.empty()) {
+            header = existing + ", " + header;
+        }
+        raw_.setHeader("Link", header);
+        return *this;
+    }
+
+    // ── Cookies ──────────────────────────────────────────────────────
+
+    /**
+     * @brief Set a cookie on the response.
+     *
+     * @param name Cookie name.
+     * @param value Cookie value.
+     * @param opts Cookie options.
+     * @return Reference to this Response.
+     *
+     * @par Example
+     * @code{.cpp}
+     *   res.cookie("session", "abc123", {.httpOnly = true, .secure = true});
+     * @endcode
+     *
+     * @since 0.1.0
+     */
+    Response& cookie(const std::string& name, const std::string& value,
+                     const CookieOptions& opts = {}) {
+        cookie::SetCookie sc;
+        sc.name = name;
+        sc.value = value;
+        sc.path = opts.path;
+        sc.httpOnly = opts.httpOnly;
+        sc.secure = opts.secure;
+        if (opts.domain) sc.domain = *opts.domain;
+        if (opts.maxAge) {
+            sc.maxAge = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::seconds>(*opts.maxAge).count()
+            );
+        }
+        if (opts.expires) sc.expires = *opts.expires;
+        if (!opts.sameSite.empty()) sc.sameSite = opts.sameSite;
+
+        auto headerVal = cookie::stringifySetCookie(sc);
+        // Append to existing Set-Cookie headers
+        raw_.appendHeader("Set-Cookie", headerVal);
+        return *this;
+    }
+
+    /**
+     * @brief Clear a cookie.
+     *
+     * @param name Cookie name.
+     * @param opts Cookie options (path and domain must match the set cookie).
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& clearCookie(const std::string& name,
+                          const CookieOptions& opts = {}) {
+        CookieOptions clearOpts = opts;
+        clearOpts.maxAge = std::chrono::milliseconds(0);
+        // Set expiry to epoch
+        clearOpts.expires = std::chrono::system_clock::from_time_t(0);
+        return cookie(name, "", clearOpts);
+    }
+
+    // ── Redirect ─────────────────────────────────────────────────────
+
+    /**
+     * @brief Redirect to a URL with status 302.
+     *
+     * @param url The redirect URL.
+     * @since 0.1.0
+     */
+    void redirect(const std::string& url) {
+        redirect(302, url);
+    }
+
+    /**
+     * @brief Redirect to a URL with a specific status code.
+     *
+     * @param statusCode The redirect status code (301, 302, 303, 307, 308).
+     * @param url The redirect URL.
+     * @since 0.1.0
+     */
+    void redirect(int statusCode, const std::string& url) {
+        auto loc = url;
+
+        // Handle "back" redirect
+        if (loc == "back") {
+            if (req_) {
+                auto referer = req_->get("referrer");
+                if (!referer) referer = req_->get("referer");
+                loc = referer.value_or("/");
+            } else {
+                loc = "/";
+            }
+        }
+
+        // Set Location header
+        raw_.setHeader("Location", detail::encodeUrl(loc));
+        raw_.status(statusCode);
+
+        // Send a simple HTML body for non-HEAD requests
+        auto body = "<p>" + std::to_string(statusCode) + " Redirecting to <a href=\""
+                    + detail::escapeHtml(loc) + "\">" + detail::escapeHtml(loc) + "</a></p>";
+        raw_.setHeader("Content-Type", "text/html; charset=utf-8");
+        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
+
+        if (req_ && req_->method() == "HEAD") {
+            raw_.end();
+        } else {
+            raw_.end(body);
+        }
+    }
+
+    // ── Location ─────────────────────────────────────────────────────
+
+    /**
+     * @brief Set the Location header.
+     *
+     * @param url The URL for the Location header.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& location(const std::string& url) {
+        raw_.setHeader("Location", detail::encodeUrl(url));
+        return *this;
+    }
+
+    // ── File Serving ─────────────────────────────────────────────────
+
+    /**
+     * @brief Send a file as the response.
+     *
+     * @param filePath The path to the file.
+     * @param opts Options for file serving.
+     * @param callback Optional callback for errors.
+     * @since 0.1.0
+     */
+    void sendFile(const std::string& filePath, const SendFileOptions& opts = {},
+                  std::function<void(std::optional<std::string>)> callback = nullptr) {
+        // Resolve the path
+        std::string resolvedPath;
+        if (!opts.root.empty()) {
+            resolvedPath = path::join(opts.root, filePath);
+        } else {
+            resolvedPath = filePath;
+        }
+
+        // Check for dotfile
+        auto basename = path::basename(resolvedPath);
+        if (!basename.empty() && basename[0] == '.') {
+            if (opts.dotfiles == "deny") {
+                status(403);
+                raw_.end("Forbidden");
+                if (callback) callback("Forbidden");
+                return;
+            } else if (opts.dotfiles == "ignore") {
+                status(404);
+                raw_.end("Not Found");
+                if (callback) callback("Not Found");
+                return;
+            }
+        }
+
+        // Read the file using fs and send it
+        // For now, use synchronous reading (simplified)
+        try {
+            auto contentStr = fs::readFileSync(resolvedPath);
+
+            // Set Content-Type
+            auto ext = path::extname(resolvedPath);
+            if (!ext.empty()) {
+                auto ct = mime::contentType(ext);
+                if (ct) {
+                    raw_.setHeader("Content-Type", *ct);
+                }
+            }
+
+            // Set custom headers
+            for (const auto& [key, val] : opts.headers) {
+                raw_.setHeader(key, val);
+            }
+
+            // Set cache headers
+            if (opts.maxAge) {
+                auto maxAgeSec = std::chrono::duration_cast<std::chrono::seconds>(*opts.maxAge).count();
+                raw_.setHeader("Cache-Control", "public, max-age=" + std::to_string(maxAgeSec));
+            }
+
+            // Set ETag
+            if (opts.etag) {
+                auto etag = detail::generateWeakETag(contentStr);
+                raw_.setHeader("ETag", etag);
+            }
+
+            // Check freshness
+            if (req_ && req_->fresh()) {
+                raw_.status(304);
+                raw_.end();
+                if (callback) callback(std::nullopt);
+                return;
+            }
+
+            raw_.setHeader("Content-Length", static_cast<int>(contentStr.size()));
+            raw_.end(contentStr);
+            if (callback) callback(std::nullopt);
+        } catch (const std::exception& e) {
+            if (callback) {
+                callback(e.what());
+            } else {
+                throw;
+            }
+        }
+    }
+
+    /**
+     * @brief Send a file as a download attachment.
+     *
+     * @param filePath The path to the file.
+     * @param filename The download filename (defaults to basename of filePath).
+     * @param opts Options for file serving.
+     * @param callback Optional callback for errors.
+     * @since 0.1.0
+     */
+    void download(const std::string& filePath,
+                  const std::string& filename = "",
+                  const SendFileOptions& opts = {},
+                  std::function<void(std::optional<std::string>)> callback = nullptr) {
+        auto name = filename.empty() ? path::basename(filePath) : filename;
+        auto cd = detail::contentDisposition("attachment", name);
+        raw_.setHeader("Content-Disposition", cd);
+        sendFile(filePath, opts, std::move(callback));
+    }
+
+    /**
+     * @brief Set the Content-Disposition header for attachment.
+     *
+     * @param filename Optional filename for the attachment.
+     * @return Reference to this Response.
+     * @since 0.1.0
+     */
+    Response& attachment(const std::string& filename = "") {
+        if (!filename.empty()) {
+            // Set Content-Type based on extension
+            auto ext = path::extname(filename);
+            if (!ext.empty()) {
+                auto ct = mime::contentType(ext);
+                if (ct) {
+                    raw_.setHeader("Content-Type", *ct);
+                }
+            }
+        }
+        raw_.setHeader("Content-Disposition",
+                       detail::contentDisposition("attachment", filename));
+        return *this;
+    }
+
+    // ── Content Negotiation ──────────────────────────────────────────
+
+    /**
+     * @brief Respond based on accepted content type.
+     *
+     * @param obj Map of content-type to handler function.
+     * @return Reference to this Response.
+     *
+     * @par Example
+     * @code{.cpp}
+     *   res.format({
+     *       {"text/html", [&]() { res.send("<p>Hello</p>"); }},
+     *       {"application/json", [&]() { res.json({{"msg", "Hello"}}); }},
+     *       {"default", [&]() { res.sendStatus(406); }}
+     *   });
+     * @endcode
+     *
+     * @since 0.1.0
+     */
+    Response& format(const std::map<std::string, std::function<void()>>& obj) {
+        if (!req_) {
+            // No request context, try default
+            auto defIt = obj.find("default");
+            if (defIt != obj.end()) {
+                defIt->second();
+            } else {
+                sendStatus(406);
+            }
+            return *this;
+        }
+
+        // Build list of types
+        std::vector<std::string> types;
+        for (const auto& [key, _] : obj) {
+            if (key != "default") {
+                types.push_back(key);
+            }
+        }
+
+        auto accepted = req_->accepts(types);
+        if (accepted) {
+            vary("Accept");
+            auto it = obj.find(*accepted);
+            if (it != obj.end()) {
+                it->second();
+            }
+        } else {
+            auto defIt = obj.find("default");
+            if (defIt != obj.end()) {
+                defIt->second();
+            } else {
+                sendStatus(406);
+            }
+        }
+        return *this;
+    }
+
+    // ── Template Rendering ───────────────────────────────────────────
+
+    /**
+     * @brief Render a view template.
+     *
+     * @param view The view name.
+     * @param options Template variables.
+     * @param callback Optional callback (error, rendered).
+     * @since 0.1.0
+     */
+    void render(const std::string& view, const JsonValue& options = JsonObject{},
+                std::function<void(std::optional<std::string>, std::string)> callback = nullptr);
+
+    // ── Raw HTTP Access ──────────────────────────────────────────────
+
+    /** @brief Get the raw HTTP server response. @since 0.1.0 */
+    http::ServerResponse& raw() { return raw_; }
+
+    /** @brief Get the raw HTTP server response (const). @since 0.1.0 */
+    const http::ServerResponse& raw() const { return raw_; }
+
+    // ── Context ──────────────────────────────────────────────────────
+
+    /** @brief Get the application. @since 0.1.0 */
+    Application* app() const { return app_; }
+
+    /** @brief Get the associated request. @since 0.1.0 */
+    Request* req() const { return req_; }
+
+    /** @brief Set the associated request (internal use). @since 0.1.0 */
+    void setReq(Request* req) { req_ = req; }
+
+private:
+    http::ServerResponse& raw_;
+    Application* app_ = nullptr;
+    Request* req_ = nullptr;
+    int statusCode_ = 0;
+};
+
+} // namespace express
+} // namespace polycpp

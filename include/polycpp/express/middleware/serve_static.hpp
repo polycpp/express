@@ -1,0 +1,178 @@
+#pragma once
+
+/**
+ * @file middleware/serve_static.hpp
+ * @brief Static file serving middleware.
+ *
+ * C++ port of npm serve-static. Serves static files from a directory.
+ *
+ * @see https://www.npmjs.com/package/serve-static
+ * @since 0.1.0
+ */
+
+#include <string>
+
+#include <polycpp/fs.hpp>
+#include <polycpp/mime/mime.hpp>
+#include <polycpp/path.hpp>
+
+#include <polycpp/express/types.hpp>
+#include <polycpp/express/http_error.hpp>
+#include <polycpp/express/detail/utils.hpp>
+
+namespace polycpp {
+namespace express {
+
+/**
+ * @brief Create a static file serving middleware.
+ *
+ * Serves files from the given root directory.
+ *
+ * @param root The root directory to serve files from.
+ * @param opts Static serving options.
+ * @return A middleware handler.
+ *
+ * @par Example
+ * @code{.cpp}
+ *   app.use(express::static_("public"));
+ *   // Files in ./public/ are now served
+ * @endcode
+ *
+ * @since 0.1.0
+ */
+inline MiddlewareHandler serveStatic(const std::string& root,
+                                      const StaticOptions& opts = {}) {
+    auto resolvedRoot = path::resolve(root);
+
+    return [resolvedRoot, opts](Request& req, Response& res, NextFunction next) {
+        // Only handle GET and HEAD requests
+        auto method = req.method();
+        if (method != "GET" && method != "HEAD") {
+            next(std::nullopt);
+            return;
+        }
+
+        auto reqPath = req.path();
+
+        // Security: prevent directory traversal
+        if (reqPath.find("..") != std::string::npos) {
+            if (opts.fallthrough) {
+                next(std::nullopt);
+            } else {
+                next(HttpError::forbidden("Forbidden"));
+            }
+            return;
+        }
+
+        // Build the file path
+        auto filePath = path::join(resolvedRoot, reqPath);
+
+        try {
+            // Check if the file exists
+            auto stats = fs::statSync(filePath);
+
+            if (stats.isDirectory()) {
+                // Try index file
+                if (!opts.index.empty()) {
+                    auto indexPath = path::join(filePath, opts.index);
+                    try {
+                        fs::statSync(indexPath);
+                        filePath = indexPath;
+                    } catch (...) {
+                        // No index file
+                        if (opts.redirect && reqPath.back() != '/') {
+                            // Redirect to trailing slash
+                            res.redirect(301, reqPath + "/");
+                            return;
+                        }
+                        if (opts.fallthrough) {
+                            next(std::nullopt);
+                        } else {
+                            next(HttpError::notFound());
+                        }
+                        return;
+                    }
+                } else {
+                    if (opts.fallthrough) {
+                        next(std::nullopt);
+                    } else {
+                        next(HttpError::notFound());
+                    }
+                    return;
+                }
+            }
+
+            // Check dotfile
+            auto basename = path::basename(filePath);
+            if (!basename.empty() && basename[0] == '.') {
+                if (opts.dotfiles == "deny") {
+                    res.status(403);
+                    res.raw().setHeader("Content-Type", "text/plain; charset=utf-8");
+                    res.raw().end("Forbidden");
+                    return;
+                } else if (opts.dotfiles == "ignore") {
+                    if (opts.fallthrough) {
+                        next(std::nullopt);
+                    } else {
+                        next(HttpError::notFound());
+                    }
+                    return;
+                }
+                // "allow" falls through to serve the file
+            }
+
+            // Read and send the file
+            auto contentStr = fs::readFileSync(filePath);
+
+            // Set Content-Type
+            auto ext = path::extname(filePath);
+            if (!ext.empty()) {
+                auto ct = mime::contentType(ext);
+                if (ct) {
+                    res.raw().setHeader("Content-Type", *ct);
+                }
+            }
+
+            // Set custom headers
+            for (const auto& [key, val] : opts.headers) {
+                res.raw().setHeader(key, val);
+            }
+
+            // Set cache headers
+            if (opts.maxAge) {
+                auto maxAgeSec = std::chrono::duration_cast<std::chrono::seconds>(*opts.maxAge).count();
+                res.raw().setHeader("Cache-Control", "public, max-age=" + std::to_string(maxAgeSec));
+            }
+
+            // Set ETag
+            if (opts.etag) {
+                auto etag = detail::generateWeakETag(contentStr);
+                res.raw().setHeader("ETag", etag);
+            }
+
+            // Check freshness
+            if (req.fresh()) {
+                res.raw().status(304);
+                res.raw().end();
+                return;
+            }
+
+            res.raw().setHeader("Content-Length", static_cast<int>(contentStr.size()));
+            if (method == "HEAD") {
+                res.raw().end();
+            } else {
+                res.raw().end(contentStr);
+            }
+        } catch (...) {
+            // File not found or read error
+            if (opts.fallthrough) {
+                next(std::nullopt);
+            } else {
+                next(HttpError::notFound());
+            }
+        }
+    };
+}
+
+} // namespace express
+} // namespace polycpp
