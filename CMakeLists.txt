@@ -142,4 +142,16 @@ if(POLYCPP_EXPRESS_BUILD_TESTS)
     add_executable(test_send_file tests/test_send_file.cpp)
     target_link_libraries(test_send_file PRIVATE polycpp_express polycpp_mime GTest::gtest_main)
     gtest_discover_tests(test_send_file)
+
+    add_executable(test_response tests/test_response.cpp)
+    target_link_libraries(test_response PRIVATE polycpp_express polycpp_mime polycpp_negotiate polycpp_cookie GTest::gtest_main)
+    gtest_discover_tests(test_response)
+
+    add_executable(test_body_parser tests/test_body_parser.cpp)
+    target_link_libraries(test_body_parser PRIVATE polycpp_express polycpp_negotiate GTest::gtest_main)
+    gtest_discover_tests(test_body_parser)
+
+    add_executable(test_integration tests/test_integration.cpp)
+    target_link_libraries(test_integration PRIVATE polycpp_express polycpp_negotiate GTest::gtest_main)
+    gtest_discover_tests(test_integration)
 endif()
