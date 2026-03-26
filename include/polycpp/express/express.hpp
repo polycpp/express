@@ -59,6 +59,7 @@
 
 // Built-in middleware
 #include <polycpp/express/middleware/body_parser.hpp>
+#include <polycpp/express/middleware/cors.hpp>
 #include <polycpp/express/middleware/serve_static.hpp>
 
 namespace polycpp {
@@ -165,6 +166,25 @@ inline MiddlewareHandler raw(const RawParserOptions& opts = {}) {
  */
 inline MiddlewareHandler text(const TextParserOptions& opts = {}) {
     return textParser(opts);
+}
+
+/**
+ * @brief Create a CORS middleware.
+ *
+ * @param opts CORS options.
+ * @return A middleware handler.
+ *
+ * @par Example
+ * @code{.cpp}
+ *   app.use(express::cors());
+ *   app.use(express::cors({.origin = "https://example.com"}));
+ * @endcode
+ *
+ * @see https://github.com/expressjs/cors
+ * @since 0.1.0
+ */
+inline MiddlewareHandler cors(const CorsOptions& opts = {}) {
+    return corsMiddleware(opts);
 }
 
 /**

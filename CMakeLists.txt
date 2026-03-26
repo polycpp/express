@@ -126,4 +126,8 @@ if(POLYCPP_EXPRESS_BUILD_TESTS)
     add_executable(test_view_render tests/test_view_render.cpp)
     target_link_libraries(test_view_render PRIVATE polycpp_express GTest::gtest_main)
     gtest_discover_tests(test_view_render)
+
+    add_executable(test_cors tests/test_cors.cpp)
+    target_link_libraries(test_cors PRIVATE polycpp_express GTest::gtest_main)
+    gtest_discover_tests(test_cors)
 endif()
