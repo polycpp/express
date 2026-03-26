@@ -229,21 +229,14 @@ public:
 
     /**
      * @brief Get the protocol ("http" or "https").
+     *
+     * When the "trust proxy" setting trusts the socket address, the
+     * "X-Forwarded-Proto" header field will be trusted and used if present.
+     *
+     * @return "http" or "https".
      * @since 0.1.0
      */
-    std::string protocol() const {
-        // Check X-Forwarded-Proto if trust proxy is enabled
-        auto xfp = get("x-forwarded-proto");
-        if (xfp) {
-            auto proto = *xfp;
-            auto commaPos = proto.find(',');
-            if (commaPos != std::string::npos) {
-                proto = detail::trim(proto.substr(0, commaPos));
-            }
-            return proto;
-        }
-        return "http";
-    }
+    std::string protocol() const;
 
     /**
      * @brief Whether the connection is secure (HTTPS).
@@ -255,56 +248,38 @@ public:
 
     /**
      * @brief Get the remote IP address.
+     *
+     * When "trust proxy" is set, walks the X-Forwarded-For chain using
+     * the trust function to determine the actual client IP.
+     * When "trust proxy" is not set, returns the socket address.
+     *
+     * @return The client IP address.
      * @since 0.1.0
      */
-    std::string ip() const {
-        auto xfp = get("x-forwarded-for");
-        if (xfp) {
-            auto addrs = detail::parseForwarded(*xfp);
-            if (!addrs.empty()) {
-                return addrs[0];
-            }
-        }
-        // Get from socket
-        auto sock = raw_.socket();
-        if (sock) {
-            return sock->remoteAddress();
-        }
-        return "";
-    }
+    std::string ip() const;
 
     /**
      * @brief Get the list of proxy IP addresses.
+     *
+     * When "trust proxy" is set, returns trusted proxy addresses + client,
+     * ordered from farthest to closest. When "trust proxy" is not set,
+     * returns an empty vector.
+     *
+     * @return Vector of trusted proxy addresses.
      * @since 0.1.0
      */
-    std::vector<std::string> ips() const {
-        auto xfp = get("x-forwarded-for");
-        if (xfp) {
-            return detail::parseForwarded(*xfp);
-        }
-        return {};
-    }
+    std::vector<std::string> ips() const;
 
     /**
      * @brief Get the hostname from the Host header.
+     *
+     * When the "trust proxy" setting trusts the socket address, the
+     * "X-Forwarded-Host" header field will be trusted and used if present.
+     *
+     * @return The hostname, or std::nullopt if not available.
      * @since 0.1.0
      */
-    std::optional<std::string> hostname() const {
-        auto hostHeader = get("host");
-        if (!hostHeader) return std::nullopt;
-
-        auto host = *hostHeader;
-        // Remove port
-        auto colonPos = host.rfind(':');
-        if (colonPos != std::string::npos) {
-            // Check if this is an IPv6 address
-            auto bracketPos = host.find(']');
-            if (bracketPos == std::string::npos || colonPos > bracketPos) {
-                host = host.substr(0, colonPos);
-            }
-        }
-        return host;
-    }
+    std::optional<std::string> hostname() const;
 
     /**
      * @brief Get subdomains.
@@ -404,6 +379,22 @@ public:
 
     /** @brief Set an override path (internal use for sub-routers). @since 0.1.0 */
     void setPath(const std::string& path) { overridePath_ = path; }
+
+    /**
+     * @brief Get the socket's remote address.
+     *
+     * Returns the raw socket remote address, or empty string if unavailable.
+     *
+     * @return The socket remote address.
+     * @since 0.1.0
+     */
+    std::string socketAddr() const {
+        auto sock = raw_.socket();
+        if (sock) {
+            return sock->remoteAddress();
+        }
+        return "";
+    }
 
 private:
     http::IncomingMessage& raw_;

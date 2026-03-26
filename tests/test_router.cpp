@@ -583,7 +583,8 @@ TEST(RequestTest, XhrDetectionFalse) {
     EXPECT_FALSE(req.xhr());
 }
 
-TEST(RequestTest, ProtocolFromHeader) {
+TEST(RequestTest, ProtocolFromHeaderNoTrust) {
+    // Without trust proxy, X-Forwarded-Proto is ignored
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
@@ -592,6 +593,23 @@ TEST(RequestTest, ProtocolFromHeader) {
     };
 
     Request req(msg, nullptr);
+    EXPECT_EQ(req.protocol(), "http");
+    EXPECT_FALSE(req.secure());
+}
+
+TEST(RequestTest, ProtocolFromHeaderWithTrust) {
+    // With trust proxy = true, X-Forwarded-Proto is read
+    Application app;
+    app.set("trust proxy", true);
+
+    polycpp::http::IncomingMessage msg;
+    msg.method() = "GET";
+    msg.url() = "/";
+    msg.headers() = polycpp::JsonObject{
+        {"x-forwarded-proto", "https"}
+    };
+
+    Request req(msg, &app);
     EXPECT_EQ(req.protocol(), "https");
     EXPECT_TRUE(req.secure());
 }
@@ -607,7 +625,8 @@ TEST(RequestTest, ProtocolDefault) {
     EXPECT_FALSE(req.secure());
 }
 
-TEST(RequestTest, IpsFromForwarded) {
+TEST(RequestTest, IpsEmptyWithoutTrust) {
+    // Without trust proxy, ips() returns empty
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
@@ -617,8 +636,29 @@ TEST(RequestTest, IpsFromForwarded) {
 
     Request req(msg, nullptr);
     auto ips = req.ips();
+    EXPECT_TRUE(ips.empty());
+}
+
+TEST(RequestTest, IpsFromForwardedWithTrust) {
+    // With trust proxy = true, ips() returns the trusted addresses
+    Application app;
+    app.set("trust proxy", true);
+
+    polycpp::http::IncomingMessage msg;
+    msg.method() = "GET";
+    msg.url() = "/";
+    msg.headers() = polycpp::JsonObject{
+        {"x-forwarded-for", "1.2.3.4, 5.6.7.8"}
+    };
+
+    Request req(msg, &app);
+    auto ips = req.ips();
+    // addrs = [1.2.3.4, 5.6.7.8, ""] (socket addr is empty for mock)
+    // trust=true, all trusted, no truncation
+    // reverse: ["", 5.6.7.8, 1.2.3.4]
+    // pop: removes 1.2.3.4 -> ["", 5.6.7.8]
     ASSERT_EQ(ips.size(), 2u);
-    EXPECT_EQ(ips[0], "1.2.3.4");
+    EXPECT_EQ(ips[0], "");        // socket addr (empty in mock)
     EXPECT_EQ(ips[1], "5.6.7.8");
 }
 

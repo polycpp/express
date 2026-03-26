@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include <polycpp/buffer.hpp>
@@ -28,6 +29,7 @@
 #include <polycpp/core/number.hpp>
 #include <polycpp/crypto.hpp>
 #include <polycpp/http.hpp>
+#include <polycpp/ipaddr/detail/aggregator.hpp>
 #include <polycpp/path.hpp>
 #include <polycpp/url.hpp>
 
@@ -614,6 +616,357 @@ inline std::string trim(const std::string& s) {
     if (start == std::string::npos) return "";
     auto end = s.find_last_not_of(" \t\r\n");
     return s.substr(start, end - start + 1);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Trust function type and proxy-addr: Determine client IP behind proxies
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Trust function type: takes an IP string and hop index, returns bool.
+ *
+ * Used to determine which proxy addresses are trusted when resolving
+ * the client IP from X-Forwarded-For headers.
+ *
+ * @since 0.1.0
+ */
+using TrustFunction = std::function<bool(const std::string& addr, int hopIndex)>;
+
+/**
+ * @brief Pre-defined IP ranges for named trust specifications.
+ *
+ * Matches proxy-addr's IP_RANGES: "loopback", "linklocal", "uniquelocal".
+ *
+ * @since 0.1.0
+ */
+inline const std::map<std::string, std::vector<std::string>>& ipRanges() {
+    static const std::map<std::string, std::vector<std::string>> ranges = {
+        {"loopback",    {"127.0.0.1/8", "::1/128"}},
+        {"linklocal",   {"169.254.0.0/16", "fe80::/10"}},
+        {"uniquelocal", {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}}
+    };
+    return ranges;
+}
+
+/**
+ * @brief A parsed subnet: IP address + prefix length.
+ * @since 0.1.0
+ */
+struct Subnet {
+    std::variant<ipaddr::IPv4, ipaddr::IPv6> ip;
+    int prefix;
+};
+
+/**
+ * @brief Parse an IP or CIDR notation string into a Subnet.
+ *
+ * Handles plain IPs (e.g. "10.0.0.1"), CIDR (e.g. "10.0.0.0/8"),
+ * and IPv4-mapped IPv6 addresses (converted to IPv4).
+ *
+ * @param notation The IP/CIDR string.
+ * @return The parsed Subnet.
+ * @throws std::invalid_argument If the notation is not valid.
+ * @since 0.1.0
+ */
+inline Subnet parseIpNotation(const std::string& notation) {
+    auto slashPos = notation.rfind('/');
+    auto ipStr = (slashPos != std::string::npos)
+        ? notation.substr(0, slashPos)
+        : notation;
+
+    if (!ipaddr::isValid(ipStr)) {
+        throw std::invalid_argument("invalid IP address: " + ipStr);
+    }
+
+    auto ip = ipaddr::parse(ipStr);
+
+    // If it's an IPv4-mapped IPv6 without CIDR, convert to IPv4
+    if (slashPos == std::string::npos) {
+        if (auto* v6 = std::get_if<ipaddr::IPv6>(&ip)) {
+            if (v6->isIPv4MappedAddress()) {
+                ip = v6->toIPv4Address();
+            }
+        }
+    }
+
+    int maxPrefix = std::holds_alternative<ipaddr::IPv6>(ip) ? 128 : 32;
+
+    int prefix;
+    if (slashPos == std::string::npos) {
+        prefix = maxPrefix;
+    } else {
+        auto rangeStr = notation.substr(slashPos + 1);
+        // Check if it's all digits
+        bool allDigits = !rangeStr.empty() &&
+            std::all_of(rangeStr.begin(), rangeStr.end(),
+                        [](char c) { return c >= '0' && c <= '9'; });
+        if (allDigits) {
+            prefix = std::stoi(rangeStr);
+        } else if (std::holds_alternative<ipaddr::IPv4>(ip) &&
+                   ipaddr::IPv4::isValid(rangeStr)) {
+            // Netmask notation (IPv4 only)
+            auto mask = ipaddr::IPv4::parse(rangeStr);
+            auto pl = mask.prefixLengthFromSubnetMask();
+            if (!pl) {
+                throw std::invalid_argument("invalid range on address: " + notation);
+            }
+            prefix = *pl;
+        } else {
+            throw std::invalid_argument("invalid range on address: " + notation);
+        }
+    }
+
+    if (prefix <= 0 || prefix > maxPrefix) {
+        throw std::invalid_argument("invalid range on address: " + notation);
+    }
+
+    return {ip, prefix};
+}
+
+/**
+ * @brief Check if an IP address matches a parsed subnet.
+ *
+ * Handles cross-version matching: if the IP is IPv6 but the subnet
+ * is IPv4 (or vice versa), attempts IPv4-mapped address conversion.
+ *
+ * @param addr The IP address string.
+ * @param subnet The subnet to match against.
+ * @return true if the address is within the subnet.
+ * @since 0.1.0
+ */
+inline bool ipMatchesSubnet(const std::string& addr, const Subnet& subnet) {
+    if (!ipaddr::isValid(addr)) return false;
+
+    try {
+        auto ip = ipaddr::parse(addr);
+
+        bool ipIsV4 = std::holds_alternative<ipaddr::IPv4>(ip);
+        bool subnetIsV4 = std::holds_alternative<ipaddr::IPv4>(subnet.ip);
+
+        if (ipIsV4 == subnetIsV4) {
+            // Same IP version: direct match
+            if (ipIsV4) {
+                return std::get<ipaddr::IPv4>(ip).match(
+                    std::get<ipaddr::IPv4>(subnet.ip), subnet.prefix);
+            } else {
+                return std::get<ipaddr::IPv6>(ip).match(
+                    std::get<ipaddr::IPv6>(subnet.ip), subnet.prefix);
+            }
+        }
+
+        // Cross-version: try IPv4-mapped conversion
+        if (subnetIsV4) {
+            // Subnet is IPv4, IP is IPv6 — convert IPv6 to IPv4 if mapped
+            auto& v6 = std::get<ipaddr::IPv6>(ip);
+            if (!v6.isIPv4MappedAddress()) return false;
+            auto v4 = v6.toIPv4Address();
+            return v4.match(std::get<ipaddr::IPv4>(subnet.ip), subnet.prefix);
+        } else {
+            // Subnet is IPv6, IP is IPv4 — convert IPv4 to IPv4-mapped IPv6
+            auto v6 = std::get<ipaddr::IPv4>(ip).toIPv4MappedAddress();
+            return v6.match(std::get<ipaddr::IPv6>(subnet.ip), subnet.prefix);
+        }
+    } catch (...) {
+        return false;
+    }
+}
+
+/**
+ * @brief Compile a list of IP/CIDR strings into a trust function.
+ *
+ * Expands named ranges ("loopback", "linklocal", "uniquelocal")
+ * and parses all entries into subnets for efficient matching.
+ *
+ * @param specs Vector of IP/CIDR or named range strings.
+ * @return A TrustFunction that checks if an address matches any subnet.
+ * @since 0.1.0
+ */
+inline TrustFunction compileSubnetTrust(const std::vector<std::string>& specs) {
+    // Expand named ranges and parse all entries
+    std::vector<std::string> expanded;
+    for (const auto& spec : specs) {
+        auto it = ipRanges().find(spec);
+        if (it != ipRanges().end()) {
+            for (const auto& r : it->second) {
+                expanded.push_back(r);
+            }
+        } else {
+            expanded.push_back(spec);
+        }
+    }
+
+    std::vector<Subnet> subnets;
+    subnets.reserve(expanded.size());
+    for (const auto& s : expanded) {
+        subnets.push_back(parseIpNotation(s));
+    }
+
+    if (subnets.empty()) {
+        return [](const std::string&, int) { return false; };
+    }
+
+    return [subnets](const std::string& addr, int) -> bool {
+        for (const auto& subnet : subnets) {
+            if (ipMatchesSubnet(addr, subnet)) {
+                return true;
+            }
+        }
+        return false;
+    };
+}
+
+/**
+ * @brief Compile the "trust proxy" setting into a TrustFunction.
+ *
+ * Matches Express.js utils.js compileTrust and proxy-addr behavior:
+ * - bool true: trust all proxies
+ * - bool false / null: trust nothing
+ * - number N: trust N hops (hop index < N)
+ * - string: single IP, CIDR, comma-separated list, or named range
+ * - array: list of IPs/CIDRs/named ranges
+ *
+ * @param val The "trust proxy" setting value.
+ * @return A TrustFunction.
+ * @since 0.1.0
+ */
+inline TrustFunction compileTrust(const JsonValue& val) {
+    if (val.isNull()) {
+        return [](const std::string&, int) { return false; };
+    }
+    if (val.isBool()) {
+        bool trust = val.asBool();
+        if (trust) {
+            return [](const std::string&, int) { return true; };
+        }
+        return [](const std::string&, int) { return false; };
+    }
+    if (val.isNumber()) {
+        int hops = static_cast<int>(val.asNumber());
+        return [hops](const std::string&, int hop) { return hop < hops; };
+    }
+    if (val.isString()) {
+        auto spec = val.asString();
+        // Split comma-separated values
+        std::vector<std::string> specs;
+        std::istringstream stream(spec);
+        std::string token;
+        while (std::getline(stream, token, ',')) {
+            auto trimmed = trim(token);
+            if (!trimmed.empty()) {
+                specs.push_back(trimmed);
+            }
+        }
+        return compileSubnetTrust(specs);
+    }
+    if (val.isArray()) {
+        std::vector<std::string> specs;
+        for (const auto& item : val.asArray()) {
+            if (item.isString()) {
+                specs.push_back(item.asString());
+            }
+        }
+        return compileSubnetTrust(specs);
+    }
+    // Default: trust nothing
+    return [](const std::string&, int) { return false; };
+}
+
+/**
+ * @brief Build the full address chain: X-Forwarded-For addresses + socket address.
+ *
+ * Mirrors the npm "forwarded" module: returns [xff[0], xff[1], ..., socketAddr].
+ * The socket address is always the last element.
+ *
+ * @param socketAddr The socket remote address.
+ * @param xForwardedFor The X-Forwarded-For header value.
+ * @return Vector of addresses with socket address at the end.
+ * @since 0.1.0
+ */
+inline std::vector<std::string> buildForwardedAddrs(
+    const std::string& socketAddr,
+    const std::string& xForwardedFor) {
+    auto xffAddrs = parseForwarded(xForwardedFor);
+    xffAddrs.push_back(socketAddr);
+    return xffAddrs;
+}
+
+/**
+ * @brief Determine the client IP by walking the proxy chain.
+ *
+ * Mirrors npm proxy-addr: builds the full address chain
+ * [xff[0], xff[1], ..., socketAddr], then walks from the socket
+ * end (rightmost) towards the client. The first untrusted address
+ * is the client IP. If all are trusted, returns the leftmost address.
+ *
+ * @param socketAddr The socket remote address.
+ * @param xForwardedFor The X-Forwarded-For header value.
+ * @param trust The trust function.
+ * @return The determined client IP address.
+ * @since 0.1.0
+ */
+inline std::string proxyAddr(const std::string& socketAddr,
+                              const std::string& xForwardedFor,
+                              const TrustFunction& trust) {
+    auto addrs = buildForwardedAddrs(socketAddr, xForwardedFor);
+
+    // Walk from socket address (end) towards client (beginning).
+    // Trust check uses index i=0 for socket addr, i=1 for next hop, etc.
+    // Stop at first untrusted — that's the client.
+    // addrs = [client, proxy1, proxy2, ..., socketAddr]
+    // We iterate from the end (socket) backwards.
+    for (int i = static_cast<int>(addrs.size()) - 1; i >= 0; --i) {
+        // Hop index for trust function: distance from socket address
+        int hopIndex = static_cast<int>(addrs.size()) - 1 - i;
+        if (i == 0 || !trust(addrs[i], hopIndex)) {
+            return addrs[i];
+        }
+    }
+
+    return addrs.empty() ? socketAddr : addrs[0];
+}
+
+/**
+ * @brief Get all trusted addresses in the proxy chain.
+ *
+ * Mirrors npm proxy-addr "all" function with trust filtering.
+ * Returns addresses from closest to farthest (trust chain),
+ * excluding the socket address, reversed.
+ *
+ * Per Express.js behavior:
+ * 1. Build full chain [xff[0], ..., xff[N], socketAddr]
+ * 2. Walk from socket end, truncate at first untrusted
+ * 3. Reverse order (farthest -> closest)
+ * 4. Remove socket address (pop last after reverse)
+ *
+ * @param socketAddr The socket remote address.
+ * @param xForwardedFor The X-Forwarded-For header value.
+ * @param trust The trust function.
+ * @return Vector of trusted proxy addresses (farthest to closest).
+ * @since 0.1.0
+ */
+inline std::vector<std::string> allAddrs(const std::string& socketAddr,
+                                          const std::string& xForwardedFor,
+                                          const TrustFunction& trust) {
+    auto addrs = buildForwardedAddrs(socketAddr, xForwardedFor);
+
+    // Matches proxy-addr alladdrs: iterate from index 0 (leftmost/client)
+    // through to length-2 (last proxy before socket). Truncate at first
+    // untrusted address.
+    for (size_t i = 0; i + 1 < addrs.size(); ++i) {
+        if (!trust(addrs[i], static_cast<int>(i))) {
+            addrs.resize(i + 1);
+            break;
+        }
+    }
+
+    // Matches Express.js: addrs.reverse().pop()
+    // Reverse order, then remove the leftmost XFF entry (now last after reverse).
+    std::reverse(addrs.begin(), addrs.end());
+    if (!addrs.empty()) {
+        addrs.pop_back();
+    }
+
+    return addrs;
 }
 
 } // namespace detail

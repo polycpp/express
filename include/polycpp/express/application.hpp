@@ -81,7 +81,11 @@ public:
      * @since 0.1.0
      */
     Application& set(const std::string& setting, JsonValue val) {
-        settings_[setting] = std::move(val);
+        settings_[setting] = val;
+        // Compile trust function when "trust proxy" is set
+        if (setting == "trust proxy") {
+            trustFunction_ = detail::compileTrust(val);
+        }
         return *this;
     }
 
@@ -108,8 +112,7 @@ public:
      * @since 0.1.0
      */
     Application& enable(const std::string& setting) {
-        settings_[setting] = true;
-        return *this;
+        return set(setting, true);
     }
 
     /**
@@ -120,8 +123,7 @@ public:
      * @since 0.1.0
      */
     Application& disable(const std::string& setting) {
-        settings_[setting] = false;
-        return *this;
+        return set(setting, false);
     }
 
     /**
@@ -421,10 +423,22 @@ public:
     /** @brief Get the Router. @since 0.1.0 */
     Router& router() { return router_; }
 
+    /**
+     * @brief Get the compiled trust proxy function.
+     *
+     * Returns the trust function compiled from the "trust proxy" setting.
+     * Used internally by Request to determine whether to read proxy headers.
+     *
+     * @return The compiled TrustFunction.
+     * @since 0.1.0
+     */
+    const detail::TrustFunction& trustFunction() const { return trustFunction_; }
+
 private:
     Router router_;
     std::map<std::string, JsonValue> settings_;
     std::map<std::string, EngineFunction> engines_;
+    detail::TrustFunction trustFunction_;
     Application* parent_ = nullptr;
     std::unique_ptr<http::Server> server_;
 
