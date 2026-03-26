@@ -969,6 +969,69 @@ inline std::vector<std::string> allAddrs(const std::string& socketAddr,
     return addrs;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// HTTP date formatting (RFC 7231)
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Format a time_point as an HTTP date string (RFC 7231).
+ *
+ * Produces dates like "Thu, 01 Jan 2026 00:00:00 GMT".
+ *
+ * @param tp The time point to format.
+ * @return The formatted HTTP date string.
+ * @since 0.2.0
+ */
+inline std::string httpDate(std::chrono::system_clock::time_point tp) {
+    auto tt = std::chrono::system_clock::to_time_t(tp);
+    std::tm gmt{};
+    gmtime_r(&tt, &gmt);
+
+    static const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s, %02d %s %04d %02d:%02d:%02d GMT",
+                  dayNames[gmt.tm_wday], gmt.tm_mday, monthNames[gmt.tm_mon],
+                  gmt.tm_year + 1900, gmt.tm_hour, gmt.tm_min, gmt.tm_sec);
+    return buf;
+}
+
+/**
+ * @brief Format milliseconds-since-epoch as an HTTP date string.
+ *
+ * @param mtimeMs Modification time in milliseconds since epoch.
+ * @return The formatted HTTP date string.
+ * @since 0.2.0
+ */
+inline std::string httpDate(double mtimeMs) {
+    auto tp = std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(static_cast<int64_t>(mtimeMs)));
+    return httpDate(tp);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Stat-based ETag: weak ETag from file size + mtime
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Generate a weak ETag from file stats (size + mtime).
+ *
+ * Matches the npm etag package behavior for fs.Stats objects:
+ * W/"<size in hex>-<mtime in hex>"
+ *
+ * @param size File size in bytes.
+ * @param mtimeMs Modification time in milliseconds since epoch.
+ * @return Weak ETag string.
+ * @since 0.2.0
+ */
+inline std::string statEtag(size_t size, double mtimeMs) {
+    auto mtime = static_cast<int64_t>(mtimeMs);
+    return "W/\"" + Number::toString(static_cast<double>(size), 16) +
+           "-" + Number::toString(static_cast<double>(mtime), 16) + "\"";
+}
+
 } // namespace detail
 } // namespace express
 } // namespace polycpp

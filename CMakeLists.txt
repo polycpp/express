@@ -134,4 +134,8 @@ if(POLYCPP_EXPRESS_BUILD_TESTS)
     add_executable(test_trust_proxy tests/test_trust_proxy.cpp)
     target_link_libraries(test_trust_proxy PRIVATE polycpp_express GTest::gtest_main)
     gtest_discover_tests(test_trust_proxy)
+
+    add_executable(test_send_file tests/test_send_file.cpp)
+    target_link_libraries(test_send_file PRIVATE polycpp_express polycpp_mime GTest::gtest_main)
+    gtest_discover_tests(test_send_file)
 endif()

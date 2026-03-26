@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include <polycpp/buffer.hpp>
 #include <polycpp/fs.hpp>
 #include <polycpp/mime/mime.hpp>
 #include <polycpp/path.hpp>
@@ -76,7 +77,7 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                 if (!opts.index.empty()) {
                     auto indexPath = path::join(filePath, opts.index);
                     try {
-                        fs::statSync(indexPath);
+                        stats = fs::statSync(indexPath);
                         filePath = indexPath;
                     } catch (...) {
                         // No index file
@@ -121,8 +122,8 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                 // "allow" falls through to serve the file
             }
 
-            // Read and send the file
-            auto contentStr = fs::readFileSync(filePath);
+            auto fileSize = stats.size;
+            auto mtimeMs = stats.mtimeMs;
 
             // Set Content-Type
             auto ext = path::extname(filePath);
@@ -144,11 +145,18 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                 res.raw().setHeader("Cache-Control", "public, max-age=" + std::to_string(maxAgeSec));
             }
 
-            // Set ETag
-            if (opts.etag) {
-                auto etag = detail::generateWeakETag(contentStr);
-                res.raw().setHeader("ETag", etag);
+            // Set Last-Modified
+            if (opts.lastModified) {
+                res.raw().setHeader("Last-Modified", detail::httpDate(mtimeMs));
             }
+
+            // Set ETag from stats (size + mtime)
+            if (opts.etag) {
+                res.raw().setHeader("ETag", detail::statEtag(fileSize, mtimeMs));
+            }
+
+            // Set Accept-Ranges
+            res.raw().setHeader("Accept-Ranges", "bytes");
 
             // Check freshness
             if (req.fresh()) {
@@ -157,10 +165,51 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                 return;
             }
 
-            res.raw().setHeader("Content-Length", static_cast<int>(contentStr.size()));
+            // Handle Range requests
+            if (fileSize > 0) {
+                auto rangeHeader = req.get("range");
+                if (rangeHeader) {
+                    auto ranges = detail::parseRange(fileSize, *rangeHeader);
+                    if (!ranges.empty()) {
+                        auto& range = ranges[0];
+                        auto contentLength = range.end - range.start + 1;
+                        res.raw().status(206);
+                        res.raw().setHeader("Content-Range",
+                            "bytes " + std::to_string(range.start) + "-" +
+                            std::to_string(range.end) + "/" + std::to_string(fileSize));
+                        res.raw().setHeader("Content-Length",
+                            static_cast<int>(contentLength));
+
+                        if (method == "HEAD") {
+                            res.raw().end();
+                        } else {
+                            int fd = fs::openSync(filePath, "r");
+                            auto buf = Buffer::alloc(contentLength);
+                            fs::readSync(fd, buf, 0,
+                                         static_cast<ssize_t>(contentLength),
+                                         static_cast<ssize_t>(range.start));
+                            fs::closeSync(fd);
+                            res.raw().end(buf.toString("latin1"));
+                        }
+                        return;
+                    } else {
+                        // Invalid or unsatisfiable range -> 416
+                        res.raw().status(416);
+                        res.raw().setHeader("Content-Range",
+                            "bytes */" + std::to_string(fileSize));
+                        res.raw().setHeader("Content-Type", "text/plain; charset=utf-8");
+                        res.raw().end("Range Not Satisfiable");
+                        return;
+                    }
+                }
+            }
+
+            // Full file: 200 OK
+            res.raw().setHeader("Content-Length", static_cast<int>(fileSize));
             if (method == "HEAD") {
                 res.raw().end();
             } else {
+                auto contentStr = fs::readFileSync(filePath);
                 res.raw().end(contentStr);
             }
         } catch (...) {
