@@ -262,74 +262,61 @@ public:
      * @since 0.1.0
      */
     void handle(Request& req, Response& res, NextFunction done) {
-        auto& stack = stack_;
-        auto& params = params_;
+        // Use a shared state object for the dispatch loop to avoid
+        // self-referencing shared_ptr issues
+        struct DispatchState {
+            std::vector<std::unique_ptr<Layer>>& stack;
+            std::map<std::string, std::vector<ParamHandler>>& params;
+            Request& req;
+            Response& res;
+            NextFunction done;
+            size_t idx = 0;
+            std::string originalPath;
+        };
 
-        // Save the original URL for sub-router mounting
-        auto originalUrl = req.url();
-        auto originalPath = req.path();
+        auto state = std::make_shared<DispatchState>(DispatchState{
+            stack_, params_, req, res, std::move(done), 0, req.path()
+        });
 
-        size_t idx = 0;
+        // Create the next function that captures the shared state
+        std::function<void(std::optional<HttpError>)> next;
+        auto nextImpl = std::make_shared<std::function<void(std::optional<HttpError>)>>();
 
-        std::shared_ptr<std::function<void(std::optional<HttpError>)>> nextPtr;
-        nextPtr = std::make_shared<std::function<void(std::optional<HttpError>)>>(
-            [&, idx, nextPtr](std::optional<HttpError> err) mutable {
-                // Find next matching layer
-                while (idx < stack.size()) {
-                    auto& layer = *stack[idx++];
+        *nextImpl = [state, nextImpl, this](std::optional<HttpError> err) {
+            auto& stack = state->stack;
+            auto& req = state->req;
+            auto& res = state->res;
 
-                    // Try to match the request path
-                    auto reqPath = req.path();
-                    if (!layer.match(reqPath)) {
-                        continue;
-                    }
+            while (state->idx < stack.size()) {
+                auto& layer = *stack[state->idx++];
 
-                    // Error propagation
-                    if (err) {
-                        if (layer.isErrorHandler()) {
-                            layer.handleError(*err, req, res, *nextPtr);
-                            return;
-                        }
-                        // Skip non-error handlers when error is propagating
-                        continue;
-                    }
+                auto reqPath = req.path();
+                if (!layer.match(reqPath)) {
+                    continue;
+                }
 
-                    // Skip error handlers when no error
+                // Error propagation
+                if (err) {
                     if (layer.isErrorHandler()) {
-                        continue;
-                    }
-
-                    // If this is a route layer, check method and dispatch
-                    if (layer.route()) {
-                        auto method = req.method();
-                        if (!layer.route()->handlesMethod(method) && method != "HEAD") {
-                            continue;
-                        }
-
-                        // Set params from path matching
-                        auto& matchedParams = layer.matchedParams();
-                        for (const auto& [key, value] : matchedParams) {
-                            if (auto* s = std::get_if<std::string>(&value)) {
-                                req.params[key] = *s;
-                            }
-                        }
-
-                        // Strip matched path prefix for sub-routing
-                        auto& matchedPath = layer.matchedPath();
-
-                        // Process param handlers
-                        processParams(matchedParams, params, req, res, [&, nextPtr](std::optional<HttpError> paramErr) {
-                            if (paramErr) {
-                                (*nextPtr)(std::move(paramErr));
-                                return;
-                            }
-                            layer.route()->dispatch(req, res, *nextPtr);
-                        });
+                        layer.handleError(*err, req, res, *nextImpl);
                         return;
                     }
+                    continue;
+                }
 
-                    // Regular middleware layer
-                    // Set params
+                // Skip error handlers when no error
+                if (layer.isErrorHandler()) {
+                    continue;
+                }
+
+                // Route layer
+                if (layer.route()) {
+                    auto method = req.method();
+                    if (!layer.route()->handlesMethod(method) && method != "HEAD") {
+                        continue;
+                    }
+
+                    // Set params from path matching
                     auto& matchedParams = layer.matchedParams();
                     for (const auto& [key, value] : matchedParams) {
                         if (auto* s = std::get_if<std::string>(&value)) {
@@ -337,37 +324,54 @@ public:
                         }
                     }
 
-                    // Trim the matched path prefix for sub-routers
-                    auto& matchedPath = layer.matchedPath();
-                    if (!matchedPath.empty() && matchedPath != "/") {
-                        // Sub-router: adjust req path
-                        auto newPath = reqPath.substr(matchedPath.size());
-                        if (newPath.empty() || newPath[0] != '/') {
-                            newPath = "/" + newPath;
-                        }
-                        req.setPath(newPath);
-                        req.setBaseUrl(req.baseUrl() + matchedPath);
-                    }
-
-                    layer.handleRequest(req, res, *nextPtr);
-
-                    // Restore path after sub-router returns
-                    if (!matchedPath.empty() && matchedPath != "/") {
-                        req.setPath(originalPath);
-                    }
+                    // Process param handlers, then dispatch
+                    processParams(matchedParams, state->params, req, res,
+                        [state, nextImpl, &layer](std::optional<HttpError> paramErr) {
+                            if (paramErr) {
+                                (*nextImpl)(std::move(paramErr));
+                                return;
+                            }
+                            layer.route()->dispatch(state->req, state->res, *nextImpl);
+                        });
                     return;
                 }
 
-                // No more layers
-                if (err) {
-                    done(std::move(err));
-                } else {
-                    done(std::nullopt);
+                // Regular middleware layer
+                auto& matchedParams = layer.matchedParams();
+                for (const auto& [key, value] : matchedParams) {
+                    if (auto* s = std::get_if<std::string>(&value)) {
+                        req.params[key] = *s;
+                    }
                 }
-            }
-        );
 
-        (*nextPtr)(std::nullopt);
+                // Trim matched path prefix for sub-routers
+                auto& matchedPath = layer.matchedPath();
+                if (!matchedPath.empty() && matchedPath != "/") {
+                    auto newPath = reqPath.substr(matchedPath.size());
+                    if (newPath.empty() || newPath[0] != '/') {
+                        newPath = "/" + newPath;
+                    }
+                    req.setPath(newPath);
+                    req.setBaseUrl(req.baseUrl() + matchedPath);
+                }
+
+                layer.handleRequest(req, res, *nextImpl);
+
+                if (!matchedPath.empty() && matchedPath != "/") {
+                    req.setPath(state->originalPath);
+                }
+                return;
+            }
+
+            // No more layers
+            if (err) {
+                state->done(std::move(err));
+            } else {
+                state->done(std::nullopt);
+            }
+        };
+
+        (*nextImpl)(std::nullopt);
     }
 
     /**
@@ -427,56 +431,59 @@ private:
                        Request& req, Response& res,
                        std::function<void(std::optional<HttpError>)> done) {
         // Collect params that have handlers
-        std::vector<std::pair<std::string, std::string>> paramsToProcess;
+        auto paramsToProcess = std::make_shared<std::vector<std::pair<std::string, std::string>>>();
         for (const auto& [name, value] : matchedParams) {
             if (paramHandlers.count(name) > 0) {
                 if (auto* s = std::get_if<std::string>(&value)) {
-                    paramsToProcess.push_back({name, *s});
+                    paramsToProcess->push_back({name, *s});
                 }
             }
         }
 
-        if (paramsToProcess.empty()) {
+        if (paramsToProcess->empty()) {
             done(std::nullopt);
             return;
         }
 
-        // Process each param's handlers in sequence
-        size_t paramIdx = 0;
-        size_t handlerIdx = 0;
+        struct ParamState {
+            size_t paramIdx = 0;
+            size_t handlerIdx = 0;
+        };
 
-        std::shared_ptr<std::function<void(std::optional<HttpError>)>> nextParam;
-        nextParam = std::make_shared<std::function<void(std::optional<HttpError>)>>(
-            [&, paramIdx, handlerIdx, nextParam](std::optional<HttpError> err) mutable {
-                if (err) {
-                    done(std::move(err));
-                    return;
-                }
+        auto pState = std::make_shared<ParamState>();
+        auto donePtr = std::make_shared<std::function<void(std::optional<HttpError>)>>(std::move(done));
 
-                if (paramIdx >= paramsToProcess.size()) {
-                    done(std::nullopt);
-                    return;
-                }
-
-                auto& [name, value] = paramsToProcess[paramIdx];
-                auto it = paramHandlers.find(name);
-                if (it == paramHandlers.end() || handlerIdx >= it->second.size()) {
-                    paramIdx++;
-                    handlerIdx = 0;
-                    (*nextParam)(std::nullopt);
-                    return;
-                }
-
-                auto& handler = it->second[handlerIdx++];
-                try {
-                    handler(req, res, *nextParam, value);
-                } catch (const HttpError& e) {
-                    done(e);
-                } catch (const std::exception& e) {
-                    done(HttpError(500, e.what()));
-                }
+        auto nextParam = std::make_shared<std::function<void(std::optional<HttpError>)>>();
+        *nextParam = [paramsToProcess, &paramHandlers, &req, &res, pState, donePtr, nextParam](
+                         std::optional<HttpError> err) {
+            if (err) {
+                (*donePtr)(std::move(err));
+                return;
             }
-        );
+
+            if (pState->paramIdx >= paramsToProcess->size()) {
+                (*donePtr)(std::nullopt);
+                return;
+            }
+
+            auto& [name, value] = (*paramsToProcess)[pState->paramIdx];
+            auto it = paramHandlers.find(name);
+            if (it == paramHandlers.end() || pState->handlerIdx >= it->second.size()) {
+                pState->paramIdx++;
+                pState->handlerIdx = 0;
+                (*nextParam)(std::nullopt);
+                return;
+            }
+
+            auto& handler = it->second[pState->handlerIdx++];
+            try {
+                handler(req, res, *nextParam, value);
+            } catch (const HttpError& e) {
+                (*donePtr)(e);
+            } catch (const std::exception& e) {
+                (*donePtr)(HttpError(500, e.what()));
+            }
+        };
 
         (*nextParam)(std::nullopt);
     }
