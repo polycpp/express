@@ -130,4 +130,8 @@ if(POLYCPP_EXPRESS_BUILD_TESTS)
     add_executable(test_cors tests/test_cors.cpp)
     target_link_libraries(test_cors PRIVATE polycpp_express GTest::gtest_main)
     gtest_discover_tests(test_cors)
+
+    add_executable(test_trust_proxy tests/test_trust_proxy.cpp)
+    target_link_libraries(test_trust_proxy PRIVATE polycpp_express GTest::gtest_main)
+    gtest_discover_tests(test_trust_proxy)
 endif()

@@ -65,6 +65,87 @@
 namespace polycpp {
 namespace express {
 
+// ── Deferred implementations (require both Request and Application) ──
+
+inline std::string Request::protocol() const {
+    // Default protocol from socket
+    std::string proto = "http"; // TODO: check socket.encrypted for TLS
+
+    auto trust = app_ ? app_->trustFunction() : detail::TrustFunction{};
+    if (trust && trust(socketAddr(), 0)) {
+        auto xfp = get("x-forwarded-proto");
+        if (xfp) {
+            auto header = *xfp;
+            auto commaPos = header.find(',');
+            return commaPos != std::string::npos
+                ? detail::trim(header.substr(0, commaPos))
+                : detail::trim(header);
+        }
+    }
+    return proto;
+}
+
+inline std::string Request::ip() const {
+    auto trust = app_ ? app_->trustFunction() : detail::TrustFunction{};
+    if (!trust) {
+        return socketAddr();
+    }
+    auto xff = get("x-forwarded-for").value_or("");
+    return detail::proxyAddr(socketAddr(), xff, trust);
+}
+
+inline std::vector<std::string> Request::ips() const {
+    auto trust = app_ ? app_->trustFunction() : detail::TrustFunction{};
+    if (!trust) {
+        return {};
+    }
+    auto xff = get("x-forwarded-for").value_or("");
+    return detail::allAddrs(socketAddr(), xff, trust);
+}
+
+inline std::optional<std::string> Request::hostname() const {
+    auto trust = app_ ? app_->trustFunction() : detail::TrustFunction{};
+
+    std::string host;
+
+    // Check X-Forwarded-Host if trust proxy trusts the socket address
+    if (trust && trust(socketAddr(), 0)) {
+        auto xfh = get("x-forwarded-host");
+        if (xfh) {
+            host = *xfh;
+            // Take first value if comma-separated
+            auto commaPos = host.find(',');
+            if (commaPos != std::string::npos) {
+                host = detail::trim(host.substr(0, commaPos));
+            }
+        }
+    }
+
+    // Fall back to Host header
+    if (host.empty()) {
+        auto hostHeader = get("host");
+        if (!hostHeader) return std::nullopt;
+        host = *hostHeader;
+    }
+
+    if (host.empty()) return std::nullopt;
+
+    // Strip port — handle IPv6 literal addresses
+    size_t offset = 0;
+    if (!host.empty() && host[0] == '[') {
+        auto bracketEnd = host.find(']');
+        if (bracketEnd != std::string::npos) {
+            offset = bracketEnd + 1;
+        }
+    }
+    auto colonPos = host.find(':', offset);
+    if (colonPos != std::string::npos) {
+        host = host.substr(0, colonPos);
+    }
+
+    return host;
+}
+
 // ── Deferred implementations (require both Request and Response) ─────
 
 inline bool Request::fresh() const {
