@@ -533,14 +533,26 @@ public:
     /**
      * @brief Send a file as the response.
      *
+     * Supports Range requests (HTTP 206 Partial Content), conditional GET
+     * (304 Not Modified via ETag and Last-Modified), Accept-Ranges, and
+     * proper Content-Type detection.
+     *
      * @param filePath The path to the file.
      * @param opts Options for file serving.
      * @param callback Optional callback for errors.
+     *
+     * @par Example
+     * @code{.cpp}
+     *   res.sendFile("/path/to/photo.jpg");
+     *   res.sendFile("photo.jpg", {.root = "/uploads"});
+     * @endcode
+     *
+     * @see https://expressjs.com/en/api.html#res.sendFile
      * @since 0.1.0
      */
     void sendFile(const std::string& filePath, const SendFileOptions& opts = {},
                   std::function<void(std::optional<std::string>)> callback = nullptr) {
-        // Resolve the path
+        // 1. Resolve the path
         std::string resolvedPath;
         if (!opts.root.empty()) {
             resolvedPath = path::join(opts.root, filePath);
@@ -548,54 +560,66 @@ public:
             resolvedPath = filePath;
         }
 
-        // Check for dotfile
+        // 2. Security: check dotfiles
         auto basename = path::basename(resolvedPath);
         if (!basename.empty() && basename[0] == '.') {
             if (opts.dotfiles == "deny") {
                 status(403);
+                raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
                 raw_.end("Forbidden");
                 if (callback) callback("Forbidden");
                 return;
             } else if (opts.dotfiles == "ignore") {
                 status(404);
+                raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
                 raw_.end("Not Found");
                 if (callback) callback("Not Found");
                 return;
             }
         }
 
-        // Read the file using fs and send it
-        // For now, use synchronous reading (simplified)
         try {
-            auto contentStr = fs::readFileSync(resolvedPath);
+            // 3. Stat the file to get size and modification time
+            auto stats = fs::statSync(resolvedPath);
+            auto fileSize = stats.size;
+            auto mtimeMs = stats.mtimeMs;
 
-            // Set Content-Type
+            // 4. Set Content-Type from extension
             auto ext = path::extname(resolvedPath);
-            if (!ext.empty()) {
+            if (!ext.empty() && !raw_.hasHeader("Content-Type")) {
                 auto ct = mime::contentType(ext);
                 if (ct) {
                     raw_.setHeader("Content-Type", *ct);
                 }
             }
 
-            // Set custom headers
+            // 5. Set Last-Modified header from mtime
+            if (opts.lastModified && !raw_.hasHeader("Last-Modified")) {
+                raw_.setHeader("Last-Modified", detail::httpDate(mtimeMs));
+            }
+
+            // 6. Set ETag from stats (size + mtime)
+            if (opts.etag && !raw_.hasHeader("ETag")) {
+                raw_.setHeader("ETag", detail::statEtag(fileSize, mtimeMs));
+            }
+
+            // 7. Set Accept-Ranges
+            if (!raw_.hasHeader("Accept-Ranges")) {
+                raw_.setHeader("Accept-Ranges", "bytes");
+            }
+
+            // 8. Set custom headers
             for (const auto& [key, val] : opts.headers) {
                 raw_.setHeader(key, val);
             }
 
-            // Set cache headers
+            // 9. Set cache headers
             if (opts.maxAge) {
                 auto maxAgeSec = std::chrono::duration_cast<std::chrono::seconds>(*opts.maxAge).count();
                 raw_.setHeader("Cache-Control", "public, max-age=" + std::to_string(maxAgeSec));
             }
 
-            // Set ETag
-            if (opts.etag) {
-                auto etag = detail::generateWeakETag(contentStr);
-                raw_.setHeader("ETag", etag);
-            }
-
-            // Check freshness
+            // 10. Check conditional GET (If-None-Match + If-Modified-Since)
             if (req_ && req_->fresh()) {
                 raw_.status(304);
                 raw_.end();
@@ -603,8 +627,55 @@ public:
                 return;
             }
 
-            raw_.setHeader("Content-Length", static_cast<int>(contentStr.size()));
-            raw_.end(contentStr);
+            // 11. Handle Range requests
+            if (req_ && fileSize > 0) {
+                auto rangeHeader = req_->get("range");
+                if (rangeHeader) {
+                    auto ranges = detail::parseRange(fileSize, *rangeHeader);
+                    if (!ranges.empty()) {
+                        // Single range: 206 Partial Content
+                        auto& range = ranges[0];
+                        auto contentLength = range.end - range.start + 1;
+                        raw_.status(206);
+                        raw_.setHeader("Content-Range",
+                            "bytes " + std::to_string(range.start) + "-" +
+                            std::to_string(range.end) + "/" + std::to_string(fileSize));
+                        raw_.setHeader("Content-Length", static_cast<int>(contentLength));
+
+                        if (req_->method() == "HEAD") {
+                            raw_.end();
+                        } else {
+                            // Read only the requested range
+                            int fd = fs::openSync(resolvedPath, "r");
+                            auto buf = Buffer::alloc(contentLength);
+                            fs::readSync(fd, buf, 0, static_cast<ssize_t>(contentLength),
+                                         static_cast<ssize_t>(range.start));
+                            fs::closeSync(fd);
+                            raw_.end(buf.toString("latin1"));
+                        }
+                        if (callback) callback(std::nullopt);
+                        return;
+                    } else {
+                        // Invalid or unsatisfiable range -> 416
+                        raw_.status(416);
+                        raw_.setHeader("Content-Range",
+                            "bytes */" + std::to_string(fileSize));
+                        raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
+                        raw_.end("Range Not Satisfiable");
+                        if (callback) callback("Range Not Satisfiable");
+                        return;
+                    }
+                }
+            }
+
+            // 12. Full file: 200 OK
+            raw_.setHeader("Content-Length", static_cast<int>(fileSize));
+            if (req_ && req_->method() == "HEAD") {
+                raw_.end();
+            } else {
+                auto contentStr = fs::readFileSync(resolvedPath);
+                raw_.end(contentStr);
+            }
             if (callback) callback(std::nullopt);
         } catch (const std::exception& e) {
             if (callback) {

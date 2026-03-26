@@ -138,4 +138,8 @@ if(POLYCPP_EXPRESS_BUILD_TESTS)
     add_executable(test_compression tests/test_compression.cpp)
     target_link_libraries(test_compression PRIVATE polycpp_express GTest::gtest_main)
     gtest_discover_tests(test_compression)
+
+    add_executable(test_send_file tests/test_send_file.cpp)
+    target_link_libraries(test_send_file PRIVATE polycpp_express polycpp_mime GTest::gtest_main)
+    gtest_discover_tests(test_send_file)
 endif()
