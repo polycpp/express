@@ -122,4 +122,8 @@ if(POLYCPP_EXPRESS_BUILD_TESTS)
     add_executable(test_router tests/test_router.cpp)
     target_link_libraries(test_router PRIVATE polycpp_express GTest::gtest_main)
     gtest_discover_tests(test_router)
+
+    add_executable(test_view_render tests/test_view_render.cpp)
+    target_link_libraries(test_view_render PRIVATE polycpp_express GTest::gtest_main)
+    gtest_discover_tests(test_view_render)
 endif()

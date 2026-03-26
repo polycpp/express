@@ -27,6 +27,7 @@
 #include <polycpp/express/router.hpp>
 #include <polycpp/express/request.hpp>
 #include <polycpp/express/response.hpp>
+#include <polycpp/express/view.hpp>
 #include <polycpp/express/detail/utils.hpp>
 
 namespace polycpp {
@@ -164,6 +165,106 @@ public:
         auto dotExt = ext[0] == '.' ? ext : "." + ext;
         engines_[dotExt] = std::move(fn);
         return *this;
+    }
+
+    // ── Template Rendering ───────────────────────────────────────────
+
+    /**
+     * @brief Render a view template.
+     *
+     * Creates a View object to resolve the template file, checks the
+     * view cache, and invokes the template engine.
+     *
+     * @param name The view name.
+     * @param options Template variables.
+     * @param callback Called with (error, rendered_string).
+     *
+     * @par Example
+     * @code{.cpp}
+     *   app.render("email", {{"name", "Tobi"}}, [](auto err, auto html) {
+     *       if (!err) {
+     *           // use rendered html
+     *       }
+     *   });
+     * @endcode
+     *
+     * @see https://expressjs.com/en/api.html#app.render
+     * @since 0.1.0
+     */
+    void render(const std::string& name, const JsonValue& options,
+                std::function<void(std::optional<std::string>, std::string)> callback) {
+        // Merge render options: app.locals + options
+        JsonObject renderOptions;
+        if (locals.isObject()) {
+            for (const auto& [k, v] : locals.asObject()) {
+                renderOptions[k] = v;
+            }
+        }
+        if (options.isObject()) {
+            for (const auto& [k, v] : options.asObject()) {
+                renderOptions[k] = v;
+            }
+        }
+
+        // Check view cache
+        bool cacheEnabled = enabled("view cache");
+
+        if (cacheEnabled) {
+            auto it = viewCache_.find(name);
+            if (it != viewCache_.end()) {
+                // Use cached view
+                it->second->render(JsonValue(renderOptions), std::move(callback));
+                return;
+            }
+        }
+
+        // Get view settings
+        auto engineSetting = getSetting("view engine");
+        std::string defaultEngine;
+        if (engineSetting.isString()) {
+            defaultEngine = engineSetting.asString();
+        }
+
+        auto viewsSetting = getSetting("views");
+        std::vector<std::string> viewDirs;
+        if (viewsSetting.isString()) {
+            viewDirs.push_back(viewsSetting.asString());
+        } else if (viewsSetting.isArray()) {
+            for (const auto& v : viewsSetting.asArray()) {
+                if (v.isString()) {
+                    viewDirs.push_back(v.asString());
+                }
+            }
+        }
+
+        // Create View
+        auto view = std::make_shared<View>(name, engines_, defaultEngine, viewDirs);
+
+        if (!view->lookup()) {
+            std::string dirs;
+            if (viewDirs.size() > 1) {
+                dirs = "directories \"";
+                for (size_t i = 0; i + 1 < viewDirs.size(); ++i) {
+                    if (i > 0) dirs += "\", \"";
+                    dirs += viewDirs[i];
+                }
+                dirs += "\" or \"" + viewDirs.back() + "\"";
+            } else if (viewDirs.size() == 1) {
+                dirs = "directory \"" + viewDirs[0] + "\"";
+            } else {
+                dirs = "undefined views directory";
+            }
+            callback("Failed to lookup view \"" + name + "\" in views " + dirs, "");
+            return;
+        }
+
+        // Cache if enabled
+        if (cacheEnabled) {
+            viewCache_[name] = view;
+        }
+
+        // Render
+        view->render(JsonValue(renderOptions), std::move(callback));
     }
 
     // ── Routing (delegate to Router) ─────────────────────────────────
@@ -425,6 +526,7 @@ private:
     Router router_;
     std::map<std::string, JsonValue> settings_;
     std::map<std::string, EngineFunction> engines_;
+    std::map<std::string, std::shared_ptr<View>> viewCache_;
     Application* parent_ = nullptr;
     std::unique_ptr<http::Server> server_;
 
@@ -500,24 +602,49 @@ inline void Response::render(const std::string& view, const JsonValue& options,
         return;
     }
 
-    auto engineName = app_->getSetting("view engine");
-    auto viewsDir = app_->getSetting("views");
+    // Merge locals: app.locals < res.locals < options
+    JsonObject merged;
 
-    std::string viewPath = view;
-    if (viewsDir.isString() && !viewsDir.asString().empty()) {
-        viewPath = path::join(viewsDir.asString(), view);
-    }
-
-    // Add extension if not present
-    if (engineName.isString() && !engineName.asString().empty()) {
-        auto ext = path::extname(viewPath);
-        if (ext.empty()) {
-            viewPath += "." + engineName.asString();
+    // Add app.locals
+    if (app_->locals.isObject()) {
+        for (const auto& [k, v] : app_->locals.asObject()) {
+            merged[k] = v;
         }
     }
 
-    // TODO: engine lookup and rendering
-    if (callback) callback("Template rendering not implemented", "");
+    // Add res.locals (overrides app.locals)
+    if (locals.isObject()) {
+        for (const auto& [k, v] : locals.asObject()) {
+            merged[k] = v;
+        }
+    }
+
+    // Add options (overrides all)
+    if (options.isObject()) {
+        for (const auto& [k, v] : options.asObject()) {
+            merged[k] = v;
+        }
+    }
+
+    // Default callback sends the rendered HTML or a 500 on error
+    auto done = callback;
+    if (!done) {
+        // Capture raw_ by reference -- res must outlive the callback
+        auto& rawRef = raw_;
+        done = [this, &rawRef](std::optional<std::string> err, std::string html) {
+            if (err) {
+                rawRef.status(500);
+                rawRef.setHeader("Content-Type", "text/plain; charset=utf-8");
+                rawRef.setHeader("Content-Length", static_cast<int>(err->size()));
+                rawRef.end(*err);
+                return;
+            }
+            send(html);
+        };
+    }
+
+    // Delegate to app.render()
+    app_->render(view, JsonValue(merged), std::move(done));
 }
 
 } // namespace express

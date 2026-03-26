@@ -51,6 +51,9 @@
 #include <polycpp/express/route.hpp>
 #include <polycpp/express/router.hpp>
 
+// View
+#include <polycpp/express/view.hpp>
+
 // Application
 #include <polycpp/express/application.hpp>
 
