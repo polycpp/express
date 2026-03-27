@@ -281,8 +281,11 @@ public:
         // Create the next function that captures the shared state
         std::function<void(std::optional<HttpError>)> next;
         auto nextImpl = std::make_shared<std::function<void(std::optional<HttpError>)>>();
+        std::weak_ptr<std::function<void(std::optional<HttpError>)>> weakNext = nextImpl;
 
-        *nextImpl = [state, nextImpl, this](std::optional<HttpError> err) {
+        *nextImpl = [state, weakNext, this](std::optional<HttpError> err) {
+            auto nextImpl = weakNext.lock();
+            if (!nextImpl) return;
             auto& stack = state->stack;
             auto& req = state->req;
             auto& res = state->res;
@@ -456,8 +459,11 @@ private:
         auto donePtr = std::make_shared<std::function<void(std::optional<HttpError>)>>(std::move(done));
 
         auto nextParam = std::make_shared<std::function<void(std::optional<HttpError>)>>();
-        *nextParam = [paramsToProcess, &paramHandlers, &req, &res, pState, donePtr, nextParam](
+        std::weak_ptr<std::function<void(std::optional<HttpError>)>> weakNextParam = nextParam;
+        *nextParam = [paramsToProcess, &paramHandlers, &req, &res, pState, donePtr, weakNextParam](
                          std::optional<HttpError> err) {
+            auto nextParam = weakNextParam.lock();
+            if (!nextParam) return;
             if (err) {
                 (*donePtr)(std::move(err));
                 return;
