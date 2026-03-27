@@ -160,6 +160,10 @@ inline bool Request::fresh() const {
     if (ims) reqHeaders["if-modified-since"] = *ims;
 
     if (res_) {
+        // Only 2xx and 304 responses can be "fresh"
+        auto sc = res_->statusCode();
+        if (sc < 200 || (sc >= 300 && sc != 304)) return false;
+
         std::map<std::string, std::string> resHeaders;
         auto etag = res_->raw().getHeader("etag");
         if (!etag.empty()) resHeaders["etag"] = etag;

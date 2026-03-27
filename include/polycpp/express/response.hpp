@@ -438,6 +438,7 @@ public:
         if (!existing.empty()) {
             header = existing + ", " + header;
         }
+        detail::validateHeaderValue("Link", header);
         raw_.setHeader("Link", header);
         return *this;
     }
@@ -615,7 +616,12 @@ public:
         if (!opts.root.empty()) {
             auto resolvedRoot = path::resolve(opts.root);
             auto canonical = path::normalize(resolvedPath);
-            if (canonical.find(resolvedRoot) != 0) {
+            // Must be exactly the root, or root followed by '/'
+            bool withinRoot = (canonical == resolvedRoot) ||
+                (canonical.size() > resolvedRoot.size() &&
+                 canonical.substr(0, resolvedRoot.size()) == resolvedRoot &&
+                 canonical[resolvedRoot.size()] == '/');
+            if (!withinRoot) {
                 if (callback) {
                     callback("Forbidden");
                 } else {
@@ -630,16 +636,22 @@ public:
         // 2. Security: check dotfiles (all path components)
         if (detail::hasDotfileComponent(resolvedPath)) {
             if (opts.dotfiles == "deny") {
-                status(403);
-                raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
-                raw_.end("Forbidden");
-                if (callback) callback("Forbidden");
+                if (callback) {
+                    callback("Forbidden");
+                } else {
+                    status(403);
+                    raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
+                    raw_.end("Forbidden");
+                }
                 return;
             } else if (opts.dotfiles == "ignore") {
-                status(404);
-                raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
-                raw_.end("Not Found");
-                if (callback) callback("Not Found");
+                if (callback) {
+                    callback("Not Found");
+                } else {
+                    status(404);
+                    raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
+                    raw_.end("Not Found");
+                }
                 return;
             }
         }
@@ -674,8 +686,10 @@ public:
                 raw_.setHeader("Accept-Ranges", "bytes");
             }
 
-            // 8. Set custom headers
+            // 8. Set custom headers (with CRLF validation)
             for (const auto& [key, val] : opts.headers) {
+                detail::validateHeaderName(key);
+                detail::validateHeaderValue(key, val);
                 raw_.setHeader(key, val);
             }
 
@@ -696,7 +710,7 @@ public:
             // 11. Handle Range requests
             if (req_ && fileSize > 0) {
                 auto rangeHeader = req_->get("range");
-                if (rangeHeader) {
+                if (rangeHeader && rangeHeader->substr(0, 6) == "bytes=") {
                     auto ranges = detail::parseRange(fileSize, *rangeHeader);
                     if (!ranges.empty()) {
                         // Single range: 206 Partial Content
@@ -713,11 +727,16 @@ public:
                         } else {
                             // Read only the requested range
                             int fd = fs::openSync(resolvedPath, "r");
-                            auto buf = Buffer::alloc(contentLength);
-                            fs::readSync(fd, buf, 0, static_cast<ssize_t>(contentLength),
-                                         static_cast<ssize_t>(range.start));
-                            fs::closeSync(fd);
-                            raw_.end(detail::bufferToRawString(buf));
+                            try {
+                                auto buf = Buffer::alloc(contentLength);
+                                fs::readSync(fd, buf, 0, static_cast<ssize_t>(contentLength),
+                                             static_cast<ssize_t>(range.start));
+                                fs::closeSync(fd);
+                                raw_.end(detail::bufferToRawString(buf));
+                            } catch (...) {
+                                fs::closeSync(fd);
+                                throw;
+                            }
                         }
                         if (callback) callback(std::nullopt);
                         return;

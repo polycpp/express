@@ -68,7 +68,12 @@ inline MiddlewareHandler serveStatic(const std::string& root,
         // Security: prevent directory traversal via canonicalization
         auto filePath = path::resolve(resolvedRoot, "." + decodedPath);
         auto canonical = path::normalize(filePath);
-        if (canonical.find(resolvedRoot) != 0) {
+        // Must be exactly the root, or root followed by '/'
+        bool withinRoot = (canonical == resolvedRoot) ||
+            (canonical.size() > resolvedRoot.size() &&
+             canonical.substr(0, resolvedRoot.size()) == resolvedRoot &&
+             canonical[resolvedRoot.size()] == '/');
+        if (!withinRoot) {
             if (opts.fallthrough) {
                 next(std::nullopt);
             } else {
@@ -143,8 +148,10 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                 }
             }
 
-            // Set custom headers
+            // Set custom headers (with CRLF validation)
             for (const auto& [key, val] : opts.headers) {
+                detail::validateHeaderName(key);
+                detail::validateHeaderValue(key, val);
                 res.raw().setHeader(key, val);
             }
 
@@ -177,7 +184,7 @@ inline MiddlewareHandler serveStatic(const std::string& root,
             // Handle Range requests
             if (fileSize > 0) {
                 auto rangeHeader = req.get("range");
-                if (rangeHeader) {
+                if (rangeHeader && rangeHeader->substr(0, 6) == "bytes=") {
                     auto ranges = detail::parseRange(fileSize, *rangeHeader);
                     if (!ranges.empty()) {
                         auto& range = ranges[0];
@@ -193,12 +200,17 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                             res.raw().end();
                         } else {
                             int fd = fs::openSync(filePath, "r");
-                            auto buf = Buffer::alloc(contentLength);
-                            fs::readSync(fd, buf, 0,
-                                         static_cast<ssize_t>(contentLength),
-                                         static_cast<ssize_t>(range.start));
-                            fs::closeSync(fd);
-                            res.raw().end(detail::bufferToRawString(buf));
+                            try {
+                                auto buf = Buffer::alloc(contentLength);
+                                fs::readSync(fd, buf, 0,
+                                             static_cast<ssize_t>(contentLength),
+                                             static_cast<ssize_t>(range.start));
+                                fs::closeSync(fd);
+                                res.raw().end(detail::bufferToRawString(buf));
+                            } catch (...) {
+                                fs::closeSync(fd);
+                                throw;
+                            }
                         }
                         return;
                     } else {

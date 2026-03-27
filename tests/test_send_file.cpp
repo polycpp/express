@@ -667,3 +667,159 @@ TEST_F(ServeStaticTest, DotfilesIgnoreFallsThrough) {
 
     EXPECT_TRUE(nextCalled);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Regression: Path traversal via string prefix matching (BUG 1)
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_F(SendFileTest, PathTraversalPrefixMatchBlocked) {
+    // Create a sibling directory that shares the root prefix
+    // e.g., root=/tmp/xxx, evil=/tmp/xxx-evil/
+    auto evilDir = testDir_ + "-evil";
+    polycpp::fs::mkdirSync(evilDir, true);
+    polycpp::fs::writeFileSync(evilDir + "/secret.txt", "stolen");
+
+    MockHttp http("GET", "/secret.txt");
+    SendFileOptions opts;
+    opts.root = testDir_;
+
+    // Attempt to serve a file from the evil sibling via root option
+    // The file path resolves to testDir_-evil/secret.txt which starts with
+    // testDir_ as a string prefix but is NOT within the root directory.
+    std::optional<std::string> callbackError;
+    http.res->sendFile(evilDir + "/secret.txt", opts,
+        [&](std::optional<std::string> err) { callbackError = err; });
+
+    EXPECT_TRUE(callbackError.has_value());
+    EXPECT_EQ(*callbackError, "Forbidden");
+
+    // Cleanup
+    polycpp::fs::rmSync(evilDir, true);
+}
+
+TEST_F(ServeStaticTest, PathTraversalPrefixMatchBlocked) {
+    // Create a sibling directory that shares the root prefix
+    auto evilDir = testDir_ + "-evil";
+    polycpp::fs::mkdirSync(evilDir, true);
+    polycpp::fs::writeFileSync(evilDir + "/secret.txt", "stolen");
+
+    // The serve_static middleware uses its own root. We can't directly trigger
+    // the prefix issue through the URL (the resolve prevents it), but we verify
+    // the check is robust by ensuring a crafted canonical path is rejected.
+    auto middleware = serveStatic(testDir_);
+
+    // This should fall through (file not found) not serve evil content
+    MockHttp http("GET", "/../" + polycpp::path::basename(evilDir) + "/secret.txt");
+    bool nextCalled = false;
+    middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
+
+    EXPECT_TRUE(nextCalled);
+
+    // Cleanup
+    polycpp::fs::rmSync(evilDir, true);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Regression: fresh() with 500 status returns false (BUG 3)
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_F(SendFileTest, FreshReturnsFalseFor500Status) {
+    // First request: get the ETag
+    MockHttp http1("GET", "/hello.txt");
+    http1.res->sendFile(testDir_ + "/hello.txt");
+    auto etag = http1.sres.getHeader("ETag");
+    ASSERT_FALSE(etag.empty());
+
+    // Second request: set matching ETag but force 500 status
+    MockHttp http2("GET", "/hello.txt");
+    http2.setHeader("If-None-Match", etag);
+    http2.res->status(500);
+
+    // fresh() should return false for 500 even with matching ETag
+    EXPECT_FALSE(http2.req->fresh());
+}
+
+TEST_F(SendFileTest, FreshReturnsFalseFor404Status) {
+    MockHttp http("GET", "/hello.txt");
+    http.res->status(404);
+    http.sres.setHeader("ETag", "\"some-etag\"");
+    http.setHeader("If-None-Match", "\"some-etag\"");
+
+    EXPECT_FALSE(http.req->fresh());
+}
+
+TEST_F(SendFileTest, FreshReturnsTrueFor200WithMatchingEtag) {
+    MockHttp http("GET", "/hello.txt");
+    http.res->status(200);
+    http.sres.setHeader("ETag", "\"some-etag\"");
+    http.setHeader("If-None-Match", "\"some-etag\"");
+
+    EXPECT_TRUE(http.req->fresh());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Regression: sendFile dotfile with callback only calls callback (BUG 4)
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_F(SendFileTest, DotfileDenyWithCallbackOnlyCallsCallback) {
+    MockHttp http("GET", "/.hidden");
+    SendFileOptions opts;
+    opts.dotfiles = "deny";
+
+    std::optional<std::string> callbackError;
+    http.res->sendFile(testDir_ + "/.hidden", opts,
+        [&](std::optional<std::string> err) { callbackError = err; });
+
+    // Callback should have been called with error
+    ASSERT_TRUE(callbackError.has_value());
+    EXPECT_EQ(*callbackError, "Forbidden");
+
+    // Response should NOT have been sent (status should still be default 200)
+    EXPECT_EQ(http.sres.statusCode(), 200);
+}
+
+TEST_F(SendFileTest, DotfileIgnoreWithCallbackOnlyCallsCallback) {
+    MockHttp http("GET", "/.hidden");
+    SendFileOptions opts;
+    opts.dotfiles = "ignore";
+
+    std::optional<std::string> callbackError;
+    http.res->sendFile(testDir_ + "/.hidden", opts,
+        [&](std::optional<std::string> err) { callbackError = err; });
+
+    // Callback should have been called with error
+    ASSERT_TRUE(callbackError.has_value());
+    EXPECT_EQ(*callbackError, "Not Found");
+
+    // Response should NOT have been sent (status should still be default 200)
+    EXPECT_EQ(http.sres.statusCode(), 200);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Regression: Malformed Range header ignored, not 416 (BUG 5)
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_F(SendFileTest, MalformedRangeHeaderServesFullFile) {
+    MockHttp http("GET", "/range.txt");
+    http.setHeader("Range", "items=0-9");
+    http.res->sendFile(testDir_ + "/range.txt");
+
+    // Should serve the full file (200), not 416
+    EXPECT_EQ(http.sres.statusCode(), 200);
+    auto cl = http.sres.getHeader("Content-Length");
+    EXPECT_EQ(cl, "100");
+}
+
+TEST_F(ServeStaticTest, MalformedRangeHeaderServesFullFile) {
+    auto middleware = serveStatic(testDir_);
+
+    MockHttp http("GET", "/range.txt");
+    http.setHeader("Range", "items=0-9");
+    bool nextCalled = false;
+    middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
+
+    EXPECT_FALSE(nextCalled);
+    EXPECT_EQ(http.sres.statusCode(), 200);
+    auto cl = http.sres.getHeader("Content-Length");
+    EXPECT_EQ(cl, "100");
+}
