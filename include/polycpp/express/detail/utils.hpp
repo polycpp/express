@@ -40,6 +40,65 @@ namespace express {
 namespace detail {
 
 // ══════════════════════════════════════════════════════════════════════
+// Buffer-to-raw-string helper (avoids latin1 encoding inflation)
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Convert a Buffer to a raw std::string preserving exact bytes.
+ *
+ * Unlike Buffer::toString("latin1"), this does NOT re-encode bytes 0x80-0xFF
+ * into multi-byte UTF-8 sequences. Each byte maps to exactly one char.
+ *
+ * @param buf The buffer to convert.
+ * @return A std::string with the same byte content as the buffer.
+ * @since 0.2.0
+ */
+inline std::string bufferToRawString(const Buffer& buf) {
+    return std::string(reinterpret_cast<const char*>(buf.data()), buf.length());
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Header validation helpers
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Validate a header name, rejecting CR/LF/NUL/colon characters.
+ *
+ * Delegates to polycpp::http::validateHeaderName if available, otherwise
+ * performs inline validation.
+ *
+ * @param name The header name to validate.
+ * @throws HttpError if the name contains forbidden characters.
+ * @since 0.2.0
+ */
+inline void validateHeaderName(const std::string& name) {
+    try {
+        polycpp::http::validateHeaderName(name);
+    } catch (...) {
+        throw HttpError(500, "Invalid header name");
+    }
+}
+
+/**
+ * @brief Validate a header value, rejecting CR/LF/NUL characters.
+ *
+ * Delegates to polycpp::http::validateHeaderValue if available, otherwise
+ * performs inline validation to prevent CRLF injection.
+ *
+ * @param name The header name (for error context).
+ * @param value The header value to validate.
+ * @throws HttpError if the value contains forbidden characters.
+ * @since 0.2.0
+ */
+inline void validateHeaderValue(const std::string& name, const std::string& value) {
+    try {
+        polycpp::http::validateHeaderValue(name, value);
+    } catch (...) {
+        throw HttpError(500, "Invalid header value");
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // Path security helpers
 // ══════════════════════════════════════════════════════════════════════
 

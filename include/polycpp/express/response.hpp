@@ -114,9 +114,12 @@ public:
         }
 
         // Generate ETag if setting is enabled (before compression)
-        if (!raw_.hasHeader("ETag") && !body.empty()) {
-            auto etag = detail::generateWeakETag(body);
-            raw_.setHeader("ETag", etag);
+        // Only for GET and HEAD — ETags are meaningless for POST/PUT/DELETE
+        if (req_ && (req_->method() == "GET" || req_->method() == "HEAD")) {
+            if (!raw_.hasHeader("ETag") && !body.empty()) {
+                auto etag = detail::generateWeakETag(body);
+                raw_.setHeader("ETag", etag);
+            }
         }
 
         // Check freshness for GET/HEAD
@@ -154,7 +157,8 @@ public:
             raw_.setHeader("Content-Type", "application/octet-stream");
         }
 
-        auto bodyStr = body.toString("latin1");
+        // Convert Buffer to raw string preserving exact bytes (no latin1 inflation)
+        auto bodyStr = detail::bufferToRawString(body);
 
         // Try compression if compression middleware is active
         auto compressed = applyCompression_(bodyStr);
@@ -184,18 +188,8 @@ public:
 
         auto body = JSON::stringify(obj);
 
-        // Try compression if compression middleware is active
-        auto compressed = applyCompression_(body);
-        const std::string& output = compressed ? *compressed : body;
-
-        raw_.setHeader("Content-Length", std::to_string(output.size()));
-
-        if (req_ && req_->method() == "HEAD") {
-            raw_.end();
-        } else {
-            raw_.end(output);
-        }
-        return *this;
+        // Delegate to send() for ETag generation and 304 freshness checks
+        return send(body);
     }
 
     /**
@@ -265,9 +259,8 @@ public:
             raw_.setHeader("Content-Type", "application/json; charset=utf-8");
         }
 
-        raw_.setHeader("Content-Length", std::to_string(body.size()));
-        raw_.end(body);
-        return *this;
+        // Delegate to send() for ETag generation and 304 freshness checks
+        return send(body);
     }
 
     /**
@@ -305,6 +298,8 @@ public:
      * @since 0.1.0
      */
     Response& set(const std::string& field, const std::string& value) {
+        detail::validateHeaderName(field);
+        detail::validateHeaderValue(field, value);
         raw_.setHeader(field, value);
         return *this;
     }
@@ -317,6 +312,8 @@ public:
      */
     Response& set(const std::map<std::string, std::string>& fields) {
         for (const auto& [key, val] : fields) {
+            detail::validateHeaderName(key);
+            detail::validateHeaderValue(key, val);
             raw_.setHeader(key, val);
         }
         return *this;
@@ -353,6 +350,8 @@ public:
      * @since 0.1.0
      */
     Response& append(const std::string& field, const std::string& value) {
+        detail::validateHeaderName(field);
+        detail::validateHeaderValue(field, value);
         auto existing = raw_.getHeader(field);
         if (existing.empty()) {
             raw_.setHeader(field, value);
@@ -462,6 +461,10 @@ public:
      */
     Response& cookie(const std::string& name, const std::string& value,
                      const CookieOptions& opts = {}) {
+        // Validate cookie name/value against CRLF injection
+        detail::validateHeaderValue("Set-Cookie", name);
+        detail::validateHeaderValue("Set-Cookie", value);
+
         cookie::SetCookie sc;
         sc.name = name;
         sc.value = value;
@@ -588,6 +591,18 @@ public:
      */
     void sendFile(const std::string& filePath, const SendFileOptions& opts = {},
                   std::function<void(std::optional<std::string>)> callback = nullptr) {
+        // Security: reject null bytes in path (prevents C-level path truncation)
+        if (filePath.find('\0') != std::string::npos) {
+            if (callback) {
+                callback("Bad Request");
+            } else {
+                status(400);
+                raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
+                raw_.end("Bad Request");
+            }
+            return;
+        }
+
         // 1. Resolve the path
         std::string resolvedPath;
         if (!opts.root.empty()) {
@@ -702,7 +717,7 @@ public:
                             fs::readSync(fd, buf, 0, static_cast<ssize_t>(contentLength),
                                          static_cast<ssize_t>(range.start));
                             fs::closeSync(fd);
-                            raw_.end(buf.toString("latin1"));
+                            raw_.end(detail::bufferToRawString(buf));
                         }
                         if (callback) callback(std::nullopt);
                         return;
@@ -967,7 +982,7 @@ private:
             // (Express's compression module does this)
             raw_.removeHeader("ETag");
 
-            return compressed.toString("latin1");
+            return detail::bufferToRawString(compressed);
         } catch (...) {
             // If compression fails, send uncompressed
             return std::nullopt;

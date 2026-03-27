@@ -26,25 +26,6 @@ namespace polycpp {
 namespace express {
 
 /**
- * @brief Check if any component of a path starts with a dot.
- *
- * Splits the path by '/' and checks each component, catching cases
- * like `.secret/data.txt` that a basename-only check would miss.
- *
- * @param filePath The file path to check.
- * @return true if any path component starts with '.'.
- * @since 0.2.0
- */
-inline bool hasDotfileComponent(const std::string& filePath) {
-    std::istringstream ss(filePath);
-    std::string component;
-    while (std::getline(ss, component, '/')) {
-        if (!component.empty() && component[0] == '.') return true;
-    }
-    return false;
-}
-
-/**
  * @brief Create a static file serving middleware.
  *
  * Serves files from the given root directory.
@@ -78,6 +59,12 @@ inline MiddlewareHandler serveStatic(const std::string& root,
         // Security: URL-decode the path to catch encoded traversal (%2e%2e)
         auto decodedPath = detail::decodeURIComponent(reqPath);
 
+        // Security: reject null bytes in decoded path (prevents C-level path truncation)
+        if (decodedPath.find('\0') != std::string::npos) {
+            next(std::nullopt);
+            return;
+        }
+
         // Security: prevent directory traversal via canonicalization
         auto filePath = path::resolve(resolvedRoot, "." + decodedPath);
         auto canonical = path::normalize(filePath);
@@ -103,7 +90,7 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                         filePath = indexPath;
                     } catch (...) {
                         // No index file
-                        if (opts.redirect && reqPath.back() != '/') {
+                        if (opts.redirect && !reqPath.empty() && reqPath.back() != '/') {
                             // Redirect to trailing slash
                             res.redirect(301, reqPath + "/");
                             return;
@@ -127,7 +114,7 @@ inline MiddlewareHandler serveStatic(const std::string& root,
 
             // Check dotfile (all path components, not just basename)
             auto relPath = filePath.substr(resolvedRoot.size());
-            if (hasDotfileComponent(relPath)) {
+            if (detail::hasDotfileComponent(relPath)) {
                 if (opts.dotfiles == "deny") {
                     res.status(403);
                     res.raw().setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -211,7 +198,7 @@ inline MiddlewareHandler serveStatic(const std::string& root,
                                          static_cast<ssize_t>(contentLength),
                                          static_cast<ssize_t>(range.start));
                             fs::closeSync(fd);
-                            res.raw().end(buf.toString("latin1"));
+                            res.raw().end(detail::bufferToRawString(buf));
                         }
                         return;
                     } else {

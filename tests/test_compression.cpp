@@ -211,7 +211,7 @@ TEST(CompressBodyTest, GzipRoundTrip) {
 
     // Decompress and verify
     auto decompressed = polycpp::zlib::gunzipSync(
-        polycpp::Buffer::from(*compressed, "latin1"));
+        polycpp::Buffer::from(*compressed));
     EXPECT_EQ(decompressed.toString(), original);
 }
 
@@ -222,7 +222,7 @@ TEST(CompressBodyTest, DeflateRoundTrip) {
     EXPECT_NE(*compressed, original);
 
     auto decompressed = polycpp::zlib::inflateSync(
-        polycpp::Buffer::from(*compressed, "latin1"));
+        polycpp::Buffer::from(*compressed));
     EXPECT_EQ(decompressed.toString(), original);
 }
 
@@ -233,7 +233,7 @@ TEST(CompressBodyTest, BrotliRoundTrip) {
     EXPECT_NE(*compressed, original);
 
     auto decompressed = polycpp::zlib::brotliDecompressSync(
-        polycpp::Buffer::from(*compressed, "latin1"));
+        polycpp::Buffer::from(*compressed));
     EXPECT_EQ(decompressed.toString(), original);
 }
 
@@ -244,7 +244,7 @@ TEST(CompressBodyTest, GzipWithCustomLevel) {
     ASSERT_TRUE(compressed.has_value());
 
     auto decompressed = polycpp::zlib::gunzipSync(
-        polycpp::Buffer::from(*compressed, "latin1"));
+        polycpp::Buffer::from(*compressed));
     EXPECT_EQ(decompressed.toString(), original);
 }
 
@@ -263,7 +263,7 @@ TEST(CompressBodyTest, LargeBodyCompresses) {
     EXPECT_LT(compressed->size(), large.size());
 
     auto decompressed = polycpp::zlib::gunzipSync(
-        polycpp::Buffer::from(*compressed, "latin1"));
+        polycpp::Buffer::from(*compressed));
     EXPECT_EQ(decompressed.toString(), large);
 }
 
@@ -272,7 +272,7 @@ TEST(CompressBodyTest, EmptyBodyCompresses) {
     ASSERT_TRUE(compressed.has_value());
 
     auto decompressed = polycpp::zlib::gunzipSync(
-        polycpp::Buffer::from(*compressed, "latin1"));
+        polycpp::Buffer::from(*compressed));
     EXPECT_EQ(decompressed.toString(), "");
 }
 

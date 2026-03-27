@@ -766,3 +766,109 @@ TEST(ResponseJsonpTest, ValidCallbackSetsJavascriptContentType) {
     auto ct = f.rawRes().getHeader("Content-Type");
     EXPECT_NE(ct.find("text/javascript"), std::string::npos);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Second-round bugfix regression tests
+// ═══════════════════════════════════════════════════════════════════════
+
+// BUG 1 regression: send(Buffer) should not inflate binary data
+TEST(ResponseBugfixTest, SendBufferPreservesExactByteCount) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    // Create a Buffer with bytes 0x00-0xFF
+    auto buf = polycpp::Buffer::alloc(256);
+    for (int i = 0; i < 256; ++i) {
+        buf[i] = static_cast<uint8_t>(i);
+    }
+    f.res().send(buf);
+    auto cl = f.rawRes().getHeader("Content-Length");
+    // Content-Length must be 256 (not inflated by latin1 encoding)
+    EXPECT_EQ(cl, "256");
+}
+
+// BUG 1 regression: bufferToRawString preserves exact bytes
+TEST(ResponseBugfixTest, BufferToRawStringExactBytes) {
+    auto buf = polycpp::Buffer::alloc(4);
+    buf[0] = 0x00;
+    buf[1] = 0x7F;
+    buf[2] = 0x80;
+    buf[3] = 0xFF;
+    auto str = polycpp::express::detail::bufferToRawString(buf);
+    EXPECT_EQ(str.size(), 4u);
+    EXPECT_EQ(static_cast<unsigned char>(str[0]), 0x00);
+    EXPECT_EQ(static_cast<unsigned char>(str[1]), 0x7F);
+    EXPECT_EQ(static_cast<unsigned char>(str[2]), 0x80);
+    EXPECT_EQ(static_cast<unsigned char>(str[3]), 0xFF);
+}
+
+// BUG 2 regression: CRLF injection in header names
+TEST(ResponseBugfixTest, CrlfInjectionInHeaderNameThrows) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    EXPECT_THROW(f.res().set("X-Bad\r\nHeader", "value"), HttpError);
+}
+
+// BUG 2 regression: CRLF injection in header values
+TEST(ResponseBugfixTest, CrlfInjectionInHeaderValueThrows) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    EXPECT_THROW(f.res().set("X-Custom", "value\r\nEvil: injected"), HttpError);
+}
+
+// BUG 2 regression: null byte in header value
+TEST(ResponseBugfixTest, NullByteInHeaderValueThrows) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    std::string val = std::string("good") + '\0' + "evil";
+    EXPECT_THROW(f.res().set("X-Custom", val), HttpError);
+}
+
+// BUG 2 regression: append() also validates
+TEST(ResponseBugfixTest, AppendValidatesHeaderValue) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    EXPECT_THROW(f.res().append("X-Custom", "a\r\nb"), HttpError);
+}
+
+// BUG 4 regression: null byte in path rejected by sendFile
+TEST(ResponseBugfixTest, SendFileRejectsNullByteInPath) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    std::string maliciousPath = std::string("/etc/passwd") + '\0' + ".jpg";
+    bool callbackCalled = false;
+    std::optional<std::string> callbackErr;
+    f.res().sendFile(maliciousPath, {}, [&](auto err) {
+        callbackCalled = true;
+        callbackErr = err;
+    });
+    EXPECT_TRUE(callbackCalled);
+    EXPECT_TRUE(callbackErr.has_value());
+    EXPECT_EQ(*callbackErr, "Bad Request");
+}
+
+// BUG 5 regression: ETags not generated for POST
+TEST(ResponseBugfixTest, NoETagForPostRequest) {
+    ResponseTestFixture f("POST", "/", {{"host", "localhost"}});
+    f.res().send("some body data");
+    auto etag = f.rawRes().getHeader("ETag");
+    EXPECT_TRUE(etag.empty());
+}
+
+// BUG 5 regression: ETags still generated for GET
+TEST(ResponseBugfixTest, ETagGeneratedForGetRequest) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    f.res().send("some body data");
+    auto etag = f.rawRes().getHeader("ETag");
+    EXPECT_FALSE(etag.empty());
+}
+
+// BUG 8 regression: json() generates ETag via send()
+TEST(ResponseBugfixTest, JsonGeneratesETag) {
+    ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
+    f.res().json(polycpp::JsonObject{{"key", "value"}});
+    auto etag = f.rawRes().getHeader("ETag");
+    EXPECT_FALSE(etag.empty());
+}
+
+// BUG 10 regression: engine() with empty extension does not crash
+TEST(ApplicationBugfixTest, EngineEmptyExtNoCrash) {
+    Application app;
+    EXPECT_NO_THROW(app.engine("", [](const std::string&, const polycpp::JsonValue&,
+                                       std::function<void(std::optional<std::string>, std::string)> cb) {
+        cb(std::nullopt, "");
+    }));
+}

@@ -164,6 +164,7 @@ public:
      * @since 0.1.0
      */
     Application& engine(const std::string& ext, EngineFunction fn) {
+        if (ext.empty()) return *this;
         auto dotExt = ext[0] == '.' ? ext : "." + ext;
         engines_[dotExt] = std::move(fn);
         return *this;
@@ -593,14 +594,14 @@ private:
                 rawRes.status(statusCode);
                 rawRes.setHeader("Content-Type", "text/html; charset=utf-8");
                 auto body = detail::escapeHtml(message);
-                rawRes.setHeader("Content-Length", static_cast<int>(body.size()));
+                rawRes.setHeader("Content-Length", std::to_string(body.size()));
                 rawRes.end(body);
             } else {
                 // No route matched -- send 404
                 rawRes.status(404);
                 rawRes.setHeader("Content-Type", "text/html; charset=utf-8");
                 auto msg = std::string("Cannot ") + "find the requested resource";
-                rawRes.setHeader("Content-Length", static_cast<int>(msg.size()));
+                rawRes.setHeader("Content-Length", std::to_string(msg.size()));
                 rawRes.end(msg);
             }
         });
@@ -649,7 +650,7 @@ inline void Response::render(const std::string& view, const JsonValue& options,
             if (err) {
                 rawRef.status(500);
                 rawRef.setHeader("Content-Type", "text/plain; charset=utf-8");
-                rawRef.setHeader("Content-Length", static_cast<int>(err->size()));
+                rawRef.setHeader("Content-Length", std::to_string(err->size()));
                 rawRef.end(*err);
                 return;
             }

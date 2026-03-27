@@ -318,7 +318,7 @@ inline std::optional<std::string> compressBody(const std::string& body,
             return std::nullopt;
         }
 
-        return compressed.toString("latin1");
+        return std::string(reinterpret_cast<const char*>(compressed.data()), compressed.length());
     } catch (...) {
         return std::nullopt;
     }

@@ -346,6 +346,7 @@ public:
 
                 // Trim matched path prefix for sub-routers
                 auto& matchedPath = layer.matchedPath();
+                auto savedBaseUrl = req.baseUrl();
                 if (!matchedPath.empty() && matchedPath != "/") {
                     auto newPath = reqPath.substr(matchedPath.size());
                     if (newPath.empty() || newPath[0] != '/') {
@@ -359,6 +360,7 @@ public:
 
                 if (!matchedPath.empty() && matchedPath != "/") {
                     req.setPath(state->originalPath);
+                    req.setBaseUrl(savedBaseUrl);
                 }
                 return;
             }
