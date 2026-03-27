@@ -12,10 +12,12 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <optional>
 #include <sstream>
@@ -36,6 +38,57 @@
 namespace polycpp {
 namespace express {
 namespace detail {
+
+// ══════════════════════════════════════════════════════════════════════
+// Path security helpers
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Check if any component of a path starts with a dot.
+ *
+ * @param filePath The file path to check.
+ * @return true if any path component starts with '.'.
+ * @since 0.2.0
+ */
+inline bool hasDotfileComponent(const std::string& filePath) {
+    std::istringstream ss(filePath);
+    std::string component;
+    while (std::getline(ss, component, '/')) {
+        if (!component.empty() && component[0] == '.') return true;
+    }
+    return false;
+}
+
+/**
+ * @brief Decode percent-encoded characters in a URI component.
+ *
+ * @param str The percent-encoded string.
+ * @return The decoded string.
+ * @since 0.2.0
+ */
+inline std::string decodeURIComponent(const std::string& str) {
+    std::string result;
+    result.reserve(str.size());
+    for (size_t i = 0; i < str.size(); ++i) {
+        if (str[i] == '%' && i + 2 < str.size()) {
+            auto hex = str.substr(i + 1, 2);
+            bool valid = true;
+            for (char c : hex) {
+                if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) {
+                result += static_cast<char>(std::stoi(hex, nullptr, 16));
+                i += 2;
+                continue;
+            }
+        }
+        result += str[i];
+    }
+    return result;
+}
 
 // ══════════════════════════════════════════════════════════════════════
 // escape-html: Escape special HTML characters
@@ -81,17 +134,16 @@ inline std::string escapeHtml(const std::string& str) {
  * @since 0.1.0
  */
 inline std::string encodeUrl(const std::string& url) {
-    static const char* safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&'()*+,-./:;=?@_~";
-    static bool safeTable[256] = {};
-    static bool initialized = false;
-    if (!initialized) {
+    static const auto safeTable = []() {
+        std::array<bool, 256> table = {};
+        const char* safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&'()*+,-./:;=?@_~";
         for (const char* p = safe; *p; ++p) {
-            safeTable[static_cast<unsigned char>(*p)] = true;
+            table[static_cast<unsigned char>(*p)] = true;
         }
         // Also keep percent for already-encoded sequences
-        safeTable[static_cast<unsigned char>('%')] = true;
-        initialized = true;
-    }
+        table[static_cast<unsigned char>('%')] = true;
+        return table;
+    }();
 
     std::string result;
     result.reserve(url.size());
@@ -139,6 +191,23 @@ inline std::string cookieSign(const std::string& val, const std::string& secret)
  * @return The original value if signature is valid, std::nullopt otherwise.
  * @since 0.1.0
  */
+/**
+ * @brief Constant-time string comparison to prevent timing attacks.
+ *
+ * @param a First string.
+ * @param b Second string.
+ * @return true if strings are equal.
+ * @since 0.2.0
+ */
+inline bool timingSafeEqual(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    volatile unsigned char result = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        result |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    }
+    return result == 0;
+}
+
 inline std::optional<std::string> cookieUnsign(const std::string& signedVal,
                                                 const std::string& secret) {
     auto dotPos = signedVal.rfind('.');
@@ -147,7 +216,7 @@ inline std::optional<std::string> cookieUnsign(const std::string& signedVal,
     }
     auto val = signedVal.substr(0, dotPos);
     auto expected = cookieSign(val, secret);
-    if (expected == signedVal) {
+    if (timingSafeEqual(expected, signedVal)) {
         return val;
     }
     return std::nullopt;
@@ -254,9 +323,21 @@ inline bool isFresh(const std::map<std::string, std::string>& reqHeaders,
     auto lmIt = resHeaders.find("last-modified");
 
     if (imsIt != reqHeaders.end() && lmIt != resHeaders.end()) {
-        // Simple string comparison -- both should be HTTP-date format
-        // If Last-Modified <= If-Modified-Since, the resource hasn't changed
-        return lmIt->second <= imsIt->second;
+        // Parse HTTP dates into time_t for proper comparison
+        auto parseHttpDate = [](const std::string& dateStr) -> std::optional<time_t> {
+            struct tm tm = {};
+            if (strptime(dateStr.c_str(), "%a, %d %b %Y %H:%M:%S GMT", &tm)) {
+                return timegm(&tm);
+            }
+            return std::nullopt;
+        };
+
+        auto parsedLM = parseHttpDate(lmIt->second);
+        auto parsedIMS = parseHttpDate(imsIt->second);
+
+        if (parsedLM && parsedIMS) {
+            return *parsedLM <= *parsedIMS;
+        }
     }
 
     return false;
@@ -333,6 +414,9 @@ struct RangeSpec {
  * @since 0.1.0
  */
 inline std::vector<RangeSpec> parseRange(size_t size, const std::string& header) {
+    // size=0 means there's nothing to serve a range from
+    if (size == 0) return {};
+
     // Must start with "bytes="
     if (header.substr(0, 6) != "bytes=") {
         return {};
@@ -716,7 +800,7 @@ inline Subnet parseIpNotation(const std::string& notation) {
         }
     }
 
-    if (prefix <= 0 || prefix > maxPrefix) {
+    if (prefix < 0 || prefix > maxPrefix) {
         throw std::invalid_argument("invalid range on address: " + notation);
     }
 

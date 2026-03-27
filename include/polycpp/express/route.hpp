@@ -13,6 +13,7 @@
  */
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -107,11 +108,12 @@ public:
     void dispatch(Request& req, Response& res, NextFunction done) {
         auto method = req.method();
 
-        size_t idx = 0;
+        auto idxPtr = std::make_shared<size_t>(0);
         auto& handlers = handlers_;
 
         std::function<void(std::optional<HttpError>)> next;
-        next = [&, idx](std::optional<HttpError> err) mutable {
+        next = [&, idxPtr](std::optional<HttpError> err) mutable {
+            auto& idx = *idxPtr;
             if (err) {
                 done(std::move(err));
                 return;

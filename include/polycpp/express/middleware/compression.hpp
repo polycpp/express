@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -200,29 +201,87 @@ inline bool shouldCompress(const std::string& contentType,
 inline std::string negotiateEncoding(const std::string& acceptEncoding) {
     if (acceptEncoding.empty()) return "";
 
-    // Lowercase for comparison
-    std::string lower = acceptEncoding;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    // Parse encoding tokens properly: split by comma, extract name and quality
+    struct EncodingEntry {
+        std::string name;
+        double quality = 1.0;
+    };
 
-    // Check for "identity;q=0" or "*;q=0" which means client rejects
-    // everything -- but this is rare and complex; keep it simple.
+    std::vector<EncodingEntry> entries;
+    std::istringstream stream(acceptEncoding);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        // Trim whitespace
+        auto start = token.find_first_not_of(" \t");
+        if (start == std::string::npos) continue;
+        auto end = token.find_last_not_of(" \t");
+        token = token.substr(start, end - start + 1);
 
-    // Prefer brotli > gzip > deflate (matching npm compression behavior)
-    // Simple substring matching is sufficient for most real-world cases.
-    bool hasBr = lower.find("br") != std::string::npos;
-    bool hasGzip = lower.find("gzip") != std::string::npos;
-    bool hasDeflate = lower.find("deflate") != std::string::npos;
+        EncodingEntry entry;
+        // Check for quality parameter (;q=...)
+        auto semiPos = token.find(';');
+        if (semiPos != std::string::npos) {
+            entry.name = token.substr(0, semiPos);
+            // Trim the name
+            auto nameEnd = entry.name.find_last_not_of(" \t");
+            if (nameEnd != std::string::npos) {
+                entry.name = entry.name.substr(0, nameEnd + 1);
+            }
+            // Parse q value
+            auto qPart = token.substr(semiPos + 1);
+            auto qPos = qPart.find("q=");
+            if (qPos == std::string::npos) qPos = qPart.find("Q=");
+            if (qPos != std::string::npos) {
+                try {
+                    entry.quality = std::stod(qPart.substr(qPos + 2));
+                } catch (...) {
+                    entry.quality = 1.0;
+                }
+            }
+        } else {
+            entry.name = token;
+        }
 
-    // Check for wildcard
-    bool hasWildcard = lower.find('*') != std::string::npos;
+        // Lowercase the name
+        std::transform(entry.name.begin(), entry.name.end(), entry.name.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
 
-    if (hasBr) return "br";
-    if (hasGzip) return "gzip";
-    if (hasDeflate) return "deflate";
-    if (hasWildcard) return "gzip";  // Default to gzip for wildcard
+        // Skip encodings with q=0
+        if (entry.quality > 0) {
+            entries.push_back(std::move(entry));
+        }
+    }
 
-    return "";
+    // Find the best supported encoding by quality, preferring br > gzip > deflate
+    struct Candidate {
+        std::string name;
+        double quality;
+        int priority; // lower = higher priority (br=0, gzip=1, deflate=2)
+    };
+
+    std::vector<Candidate> candidates;
+    for (const auto& e : entries) {
+        if (e.name == "br") {
+            candidates.push_back({e.name, e.quality, 0});
+        } else if (e.name == "gzip") {
+            candidates.push_back({e.name, e.quality, 1});
+        } else if (e.name == "deflate") {
+            candidates.push_back({e.name, e.quality, 2});
+        } else if (e.name == "*") {
+            // Wildcard matches all supported encodings not explicitly listed
+            candidates.push_back({"gzip", e.quality, 1});
+        }
+    }
+
+    if (candidates.empty()) return "";
+
+    // Sort by quality (descending), then by priority (ascending)
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.quality != b.quality) return a.quality > b.quality;
+        return a.priority < b.priority;
+    });
+
+    return candidates[0].name;
 }
 
 /**

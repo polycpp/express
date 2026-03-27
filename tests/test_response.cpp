@@ -715,3 +715,54 @@ TEST(ResponseLocalsTest, LocalsCanBeSet) {
 
     EXPECT_EQ(f.res().locals["user"].asString(), "John");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Bug-fix regression tests
+// ═══════════════════════════════════════════════════════════════════════
+
+// BUG 2: statusCode() must reflect the code set via status()
+TEST(ResponseStatusCodeTest, StatusCodeReflectsSetValue) {
+    ResponseTestFixture f("GET", "/");
+
+    // Default should be 200
+    EXPECT_EQ(f.res().statusCode(), 200);
+
+    // After setting to 404, statusCode() must return 404
+    f.res().status(404);
+    EXPECT_EQ(f.res().statusCode(), 404);
+
+    // After setting to 201
+    f.res().status(201);
+    EXPECT_EQ(f.res().statusCode(), 201);
+
+    // After setting to 500
+    f.res().status(500);
+    EXPECT_EQ(f.res().statusCode(), 500);
+}
+
+// BUG 3: JSONP callback sanitization -- invalid callback falls back to JSON
+TEST(ResponseJsonpTest, InvalidCallbackFallsBackToJson) {
+    polycpp::JsonObject queryObj = {{"callback", std::string("alert('xss')")}};
+    ResponseTestFixture f("GET", "/?callback=alert('xss')",
+                          {{"host", "localhost"}});
+    // Set the query on request
+    f.rawReq().url() = "/?callback=alert('xss')";
+    auto& resp = f.res();
+    resp.jsonp(polycpp::JsonObject{{"key", "value"}});
+
+    // Since callback is invalid, should fall back to application/json
+    auto ct = f.rawRes().getHeader("Content-Type");
+    EXPECT_NE(ct.find("application/json"), std::string::npos);
+}
+
+// BUG 3: JSONP with valid callback should set text/javascript
+TEST(ResponseJsonpTest, ValidCallbackSetsJavascriptContentType) {
+    ResponseTestFixture f("GET", "/?callback=myFunc",
+                          {{"host", "localhost"}});
+    f.rawReq().url() = "/?callback=myFunc";
+    auto& resp = f.res();
+    resp.jsonp(polycpp::JsonObject{{"key", "value"}});
+
+    auto ct = f.rawRes().getHeader("Content-Type");
+    EXPECT_NE(ct.find("text/javascript"), std::string::npos);
+}

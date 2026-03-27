@@ -474,3 +474,19 @@ TEST(CompileTrustTest, ArrayWithNamedRange) {
     EXPECT_TRUE(fn("10.0.0.1", 0));
     EXPECT_FALSE(fn("10.0.0.2", 0));
 }
+
+// BUG 7: CIDR /0 prefix should be accepted
+TEST(ParseIpNotationTest, CidrZeroPrefixIsValid) {
+    auto subnet = edetail::parseIpNotation("0.0.0.0/0");
+    EXPECT_EQ(subnet.prefix, 0);
+
+    // 0.0.0.0/0 should match any IPv4
+    EXPECT_TRUE(edetail::ipMatchesSubnet("192.168.1.1", subnet));
+    EXPECT_TRUE(edetail::ipMatchesSubnet("10.0.0.1", subnet));
+    EXPECT_TRUE(edetail::ipMatchesSubnet("8.8.8.8", subnet));
+}
+
+TEST(ParseIpNotationTest, CidrZeroPrefixIpv6IsValid) {
+    auto subnet = edetail::parseIpNotation("::/0");
+    EXPECT_EQ(subnet.prefix, 0);
+}

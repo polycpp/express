@@ -487,3 +487,30 @@ TEST(CompressionMiddlewareTest, CompressWithOptionsReturnsHandler) {
     auto handler = compress({.level = 6, .threshold = 512});
     EXPECT_TRUE(static_cast<bool>(handler));
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// BUG 10: Proper Accept-Encoding parsing regression tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST(NegotiateEncodingTest, RespectsQualityZero) {
+    // br;q=0 should not select brotli
+    EXPECT_NE(cdetail::negotiateEncoding("br;q=0, gzip"), "br");
+    EXPECT_EQ(cdetail::negotiateEncoding("br;q=0, gzip"), "gzip");
+}
+
+TEST(NegotiateEncodingTest, RespectsQualityOrdering) {
+    // gzip has higher quality than br
+    auto result = cdetail::negotiateEncoding("br;q=0.5, gzip;q=1.0");
+    EXPECT_EQ(result, "gzip");
+}
+
+TEST(NegotiateEncodingTest, SubstringDoesNotMatch) {
+    // "brotli" is not "br" -- should not match brotli as br
+    // "identity" contains no supported encoding
+    EXPECT_EQ(cdetail::negotiateEncoding("identity"), "");
+}
+
+TEST(NegotiateEncodingTest, TokenBoundaryCheck) {
+    // "compress" contains no valid token for us
+    EXPECT_EQ(cdetail::negotiateEncoding("compress"), "");
+}

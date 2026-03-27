@@ -737,3 +737,64 @@ TEST(RequestTest, BaseUrl) {
     req.setBaseUrl("/api");
     EXPECT_EQ(req.baseUrl(), "/api");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Bug-fix regression tests
+// ═══════════════════════════════════════════════════════════════════════
+
+// BUG 1: Route::dispatch must not infinite-recurse with middleware calling next()
+TEST(RouteTest, DispatchMultipleMiddlewareNoInfiniteRecursion) {
+    Route route("/test");
+    int callCount = 0;
+
+    // Three middleware handlers that each call next()
+    for (int i = 0; i < 3; ++i) {
+        route.get(MiddlewareHandler([&](Request& req, Response& res, NextFunction next) {
+            callCount++;
+            next(std::nullopt);
+        }));
+    }
+
+    // Final handler
+    route.get([&](Request& req, Response& res) {
+        callCount++;
+    });
+
+    MockRequestResponse mock("GET", "/test");
+    bool doneCalled = false;
+
+    route.dispatch(mock.req(), mock.res(), [&](std::optional<HttpError> err) {
+        doneCalled = true;
+    });
+
+    // All 3 middleware + 1 final handler = 4
+    EXPECT_EQ(callCount, 4);
+}
+
+// BUG 1: Verify index advances properly (not resetting)
+TEST(RouteTest, DispatchIndexAdvancesCorrectly) {
+    Route route("/test");
+    std::vector<int> order;
+
+    route.get(MiddlewareHandler([&](Request& req, Response& res, NextFunction next) {
+        order.push_back(1);
+        next(std::nullopt);
+    }));
+
+    route.get(MiddlewareHandler([&](Request& req, Response& res, NextFunction next) {
+        order.push_back(2);
+        next(std::nullopt);
+    }));
+
+    route.get([&](Request& req, Response& res) {
+        order.push_back(3);
+    });
+
+    MockRequestResponse mock("GET", "/test");
+    route.dispatch(mock.req(), mock.res(), [](std::optional<HttpError>) {});
+
+    ASSERT_EQ(order.size(), 3u);
+    EXPECT_EQ(order[0], 1);
+    EXPECT_EQ(order[1], 2);
+    EXPECT_EQ(order[2], 3);
+}

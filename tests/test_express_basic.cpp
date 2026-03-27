@@ -375,3 +375,79 @@ TEST(LayerTest, MatchParams) {
     ASSERT_NE(val, nullptr);
     EXPECT_EQ(*val, "42");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Bug-fix regression tests
+// ═══════════════════════════════════════════════════════════════════════
+
+// BUG 6: isFresh with HTTP dates must parse dates, not compare strings
+TEST(UtilsTest, FreshnessWithHttpDates) {
+    // A date in Dec is "later" as a date but "earlier" lexicographically
+    // than a date in Feb (because 'D' < 'F'). String comparison would fail.
+    std::map<std::string, std::string> reqH = {
+        {"if-modified-since", "Wed, 01 Dec 2025 00:00:00 GMT"}
+    };
+    std::map<std::string, std::string> resH = {
+        {"last-modified", "Sat, 01 Feb 2025 00:00:00 GMT"}
+    };
+    // Feb 2025 <= Dec 2025, so resource is fresh
+    EXPECT_TRUE(edetail::isFresh(reqH, resH));
+
+    // Flip: last-modified is after if-modified-since => stale
+    resH = {{"last-modified", "Thu, 01 Jan 2026 00:00:00 GMT"}};
+    EXPECT_FALSE(edetail::isFresh(reqH, resH));
+}
+
+// BUG 7: CIDR /0 should be valid
+TEST(UtilsTest, CidrZeroPrefixIsValid) {
+    // 0.0.0.0/0 matches all IPv4
+    EXPECT_NO_THROW(edetail::parseIpNotation("0.0.0.0/0"));
+    auto subnet = edetail::parseIpNotation("0.0.0.0/0");
+    EXPECT_EQ(subnet.prefix, 0);
+}
+
+// BUG 8: parseRange with size=0 must not underflow
+TEST(UtilsTest, ParseRangeZeroSize) {
+    auto ranges = edetail::parseRange(0, "bytes=0-499");
+    EXPECT_TRUE(ranges.empty());
+}
+
+// BUG 9: encodeUrl thread safety (just verify it works; the fix is structural)
+TEST(UtilsTest, EncodeUrlBasic) {
+    EXPECT_EQ(edetail::encodeUrl("/hello world"), "/hello%20world");
+    EXPECT_EQ(edetail::encodeUrl("/already%20encoded"), "/already%20encoded");
+}
+
+// BUG 12: Cookie unsign timing-safe comparison (functional test)
+TEST(UtilsTest, CookieUnsignTimingSafe) {
+    auto signed_ = edetail::cookieSign("hello", "secret");
+    auto result = edetail::cookieUnsign(signed_, "secret");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "hello");
+
+    // Wrong secret should fail
+    auto bad = edetail::cookieUnsign(signed_, "wrong-secret");
+    EXPECT_FALSE(bad.has_value());
+
+    // Tampered signature should fail
+    auto tampered = signed_;
+    if (!tampered.empty()) tampered.back() ^= 1;
+    auto tamperResult = edetail::cookieUnsign(tampered, "secret");
+    EXPECT_FALSE(tamperResult.has_value());
+}
+
+// BUG 3: JSONP callback validation
+TEST(UtilsTest, DecodeURIComponent) {
+    EXPECT_EQ(edetail::decodeURIComponent("%2e%2e"), "..");
+    EXPECT_EQ(edetail::decodeURIComponent("/normal/path"), "/normal/path");
+    EXPECT_EQ(edetail::decodeURIComponent("%2e%2e/%2e%2e/etc/passwd"), "../../etc/passwd");
+}
+
+// BUG 5: hasDotfileComponent checks all path components
+TEST(UtilsTest, HasDotfileComponent) {
+    EXPECT_TRUE(edetail::hasDotfileComponent(".hidden/file.txt"));
+    EXPECT_TRUE(edetail::hasDotfileComponent("dir/.secret/data.txt"));
+    EXPECT_TRUE(edetail::hasDotfileComponent(".gitignore"));
+    EXPECT_FALSE(edetail::hasDotfileComponent("normal/path/file.txt"));
+    EXPECT_FALSE(edetail::hasDotfileComponent("file.txt"));
+}

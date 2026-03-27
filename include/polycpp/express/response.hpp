@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <map>
 #include <optional>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -90,8 +91,7 @@ public:
      * @since 0.1.0
      */
     int statusCode() const {
-        // Default to 200 if not explicitly set
-        return statusCode_ > 0 ? statusCode_ : 200;
+        return raw_.statusCode();
     }
 
     // ── Send Response ────────────────────────────────────────────────
@@ -131,7 +131,7 @@ public:
         const std::string& output = compressed ? *compressed : body;
 
         // Set Content-Length (after compression, if applied)
-        raw_.setHeader("Content-Length", static_cast<int>(output.size()));
+        raw_.setHeader("Content-Length", std::to_string(output.size()));
 
         // HEAD requests get no body
         if (req_ && req_->method() == "HEAD") {
@@ -160,7 +160,7 @@ public:
         auto compressed = applyCompression_(bodyStr);
         const std::string& output = compressed ? *compressed : bodyStr;
 
-        raw_.setHeader("Content-Length", static_cast<int>(output.size()));
+        raw_.setHeader("Content-Length", std::to_string(output.size()));
         if (req_ && req_->method() == "HEAD") {
             raw_.end();
         } else {
@@ -188,7 +188,7 @@ public:
         auto compressed = applyCompression_(body);
         const std::string& output = compressed ? *compressed : body;
 
-        raw_.setHeader("Content-Length", static_cast<int>(output.size()));
+        raw_.setHeader("Content-Length", std::to_string(output.size()));
 
         if (req_ && req_->method() == "HEAD") {
             raw_.end();
@@ -221,15 +221,51 @@ public:
         }
 
         if (!callback.empty()) {
+            // Validate callback name against strict pattern to prevent XSS
+            static const std::regex validCallback(R"(^[a-zA-Z_$][a-zA-Z0-9_$.[\]]*$)");
+            if (!std::regex_match(callback, validCallback)) {
+                // Invalid callback -- fall back to regular JSON
+                callback.clear();
+            }
+        }
+
+        if (!callback.empty()) {
             raw_.setHeader("Content-Type", "text/javascript; charset=utf-8");
             raw_.setHeader("X-Content-Type-Options", "nosniff");
-            // Sanitize callback
-            body = "/**/ typeof " + callback + " === 'function' && " + callback + "(" + body + ");";
+
+            // Replace characters that are valid JSON but invalid JS
+            // U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR
+            std::string safeBody;
+            safeBody.reserve(body.size());
+            for (size_t i = 0; i < body.size(); ++i) {
+                // Check for UTF-8 encoded U+2028 (E2 80 A8) and U+2029 (E2 80 A9)
+                if (i + 2 < body.size() &&
+                    static_cast<unsigned char>(body[i]) == 0xE2 &&
+                    static_cast<unsigned char>(body[i + 1]) == 0x80) {
+                    if (static_cast<unsigned char>(body[i + 2]) == 0xA8) {
+                        safeBody += "\\u2028";
+                        i += 2;
+                        continue;
+                    }
+                    if (static_cast<unsigned char>(body[i + 2]) == 0xA9) {
+                        safeBody += "\\u2029";
+                        i += 2;
+                        continue;
+                    }
+                }
+                // Replace '<' with \u003c to prevent </script> injection
+                if (body[i] == '<') {
+                    safeBody += "\\u003c";
+                } else {
+                    safeBody += body[i];
+                }
+            }
+            body = "/**/ typeof " + callback + " === 'function' && " + callback + "(" + safeBody + ");";
         } else {
             raw_.setHeader("Content-Type", "application/json; charset=utf-8");
         }
 
-        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
+        raw_.setHeader("Content-Length", std::to_string(body.size()));
         raw_.end(body);
         return *this;
     }
@@ -253,7 +289,7 @@ public:
         std::string msg = (it != codes.end()) ? it->second : std::to_string(code);
         status(code);
         raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
-        raw_.setHeader("Content-Length", static_cast<int>(msg.size()));
+        raw_.setHeader("Content-Length", std::to_string(msg.size()));
         raw_.end(msg);
         return *this;
     }
@@ -505,7 +541,7 @@ public:
         auto body = "<p>" + std::to_string(statusCode) + " Redirecting to <a href=\""
                     + detail::escapeHtml(loc) + "\">" + detail::escapeHtml(loc) + "</a></p>";
         raw_.setHeader("Content-Type", "text/html; charset=utf-8");
-        raw_.setHeader("Content-Length", static_cast<int>(body.size()));
+        raw_.setHeader("Content-Length", std::to_string(body.size()));
 
         if (req_ && req_->method() == "HEAD") {
             raw_.end();
@@ -555,14 +591,29 @@ public:
         // 1. Resolve the path
         std::string resolvedPath;
         if (!opts.root.empty()) {
-            resolvedPath = path::join(opts.root, filePath);
+            resolvedPath = path::resolve(opts.root, filePath);
         } else {
             resolvedPath = filePath;
         }
 
-        // 2. Security: check dotfiles
-        auto basename = path::basename(resolvedPath);
-        if (!basename.empty() && basename[0] == '.') {
+        // Security: canonicalize and verify path stays within root
+        if (!opts.root.empty()) {
+            auto resolvedRoot = path::resolve(opts.root);
+            auto canonical = path::normalize(resolvedPath);
+            if (canonical.find(resolvedRoot) != 0) {
+                if (callback) {
+                    callback("Forbidden");
+                } else {
+                    status(403);
+                    raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
+                    raw_.end("Forbidden");
+                }
+                return;
+            }
+        }
+
+        // 2. Security: check dotfiles (all path components)
+        if (detail::hasDotfileComponent(resolvedPath)) {
             if (opts.dotfiles == "deny") {
                 status(403);
                 raw_.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -640,7 +691,7 @@ public:
                         raw_.setHeader("Content-Range",
                             "bytes " + std::to_string(range.start) + "-" +
                             std::to_string(range.end) + "/" + std::to_string(fileSize));
-                        raw_.setHeader("Content-Length", static_cast<int>(contentLength));
+                        raw_.setHeader("Content-Length", std::to_string(contentLength));
 
                         if (req_->method() == "HEAD") {
                             raw_.end();
@@ -669,7 +720,7 @@ public:
             }
 
             // 12. Full file: 200 OK
-            raw_.setHeader("Content-Length", static_cast<int>(fileSize));
+            raw_.setHeader("Content-Length", std::to_string(fileSize));
             if (req_ && req_->method() == "HEAD") {
                 raw_.end();
             } else {
@@ -850,7 +901,7 @@ private:
         }
 
         // Check body size against threshold
-        if (static_cast<int>(body.size()) < threshold) {
+        if (body.size() < static_cast<size_t>(threshold)) {
             return std::nullopt;
         }
 
@@ -990,7 +1041,6 @@ private:
     http::ServerResponse& raw_;
     Application* app_ = nullptr;
     Request* req_ = nullptr;
-    int statusCode_ = 0;
 };
 
 } // namespace express
