@@ -14,6 +14,7 @@
 #include <string>
 
 #include <polycpp/core/json.hpp>
+#include <polycpp/event_loop.hpp>
 #include <polycpp/negotiate/negotiate.hpp>
 #include <polycpp/qs/qs.hpp>
 
@@ -31,21 +32,28 @@ namespace express {
  *
  * @param req The request.
  * @param limit Maximum body size in bytes.
- * @return The body string.
- * @throws HttpError if body exceeds limit.
  * @since 0.1.0
  */
 inline std::string readBody(Request& req, int64_t limit) {
     auto& raw = req.raw();
-    // Read all buffered data from the Readable stream synchronously.
-    auto buf = raw.read();
-    auto bodyStr = buf.toString();
+    std::string body;
 
-    if (limit > 0 && static_cast<int64_t>(bodyStr.size()) > limit) {
-        throw HttpError::payloadTooLarge("Request body too large");
+    auto& ctx = polycpp::event_loop::EventLoop::instance().context();
+    while (true) {
+        auto buf = raw.read();
+        if (buf.length() > 0) {
+            body.append(reinterpret_cast<const char*>(buf.data()), buf.length());
+            if (limit > 0 && static_cast<int64_t>(body.size()) > limit) {
+                throw HttpError::payloadTooLarge("Request body too large");
+            }
+        }
+        if (raw.readableEnded()) {
+            break;
+        }
+        ctx.pollOnce();
     }
 
-    return bodyStr;
+    return body;
 }
 
 /**
