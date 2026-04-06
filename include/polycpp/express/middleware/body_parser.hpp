@@ -37,8 +37,9 @@ namespace express {
  */
 inline std::string readBody(Request& req, int64_t limit) {
     auto& raw = req.raw();
-    auto body = raw.body();
-    auto bodyStr = body.toString();
+    // Read all buffered data from the Readable stream synchronously.
+    auto buf = raw.read();
+    auto bodyStr = buf.toString();
 
     if (limit > 0 && static_cast<int64_t>(bodyStr.size()) > limit) {
         throw HttpError::payloadTooLarge("Request body too large");

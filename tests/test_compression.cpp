@@ -17,8 +17,8 @@ namespace cdetail = polycpp::express::detail;
 class CompressionTestFixture {
 public:
     CompressionTestFixture(const std::string& method, const std::string& url,
-                           const polycpp::JsonObject& headers = {})
-        : msg_(), res_(msg_.socket(), "", 1, false) {
+                           const polycpp::http::Headers& headers = {})
+        : msg_(), res_(polycpp::net::Socket()) {
         msg_.method() = method;
         msg_.url() = url;
         msg_.headers() = headers;
@@ -38,6 +38,21 @@ private:
     std::unique_ptr<Request> req_;
     std::unique_ptr<Response> resp_;
 };
+
+// Helper: extract getHeader() result as std::string
+static std::string getHeaderStr(polycpp::http::ServerResponse& res, const std::string& name) {
+    auto val = res.getHeader(name);
+    if (val.isString()) return val.asString();
+    if (val.isArray()) {
+        std::string result;
+        for (const auto& item : val.asArray()) {
+            if (!result.empty()) result += ", ";
+            if (item.isString()) result += item.asString();
+        }
+        return result;
+    }
+    return {};
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // shouldCompress: default compressible types
@@ -290,7 +305,7 @@ TEST(CompressionMiddlewareTest, SetsVaryAcceptEncoding) {
     });
 
     EXPECT_TRUE(nextCalled);
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Accept-Encoding"), std::string::npos);
 }
 
@@ -304,7 +319,7 @@ TEST(CompressionMiddlewareTest, SetsVaryEvenWithoutAcceptEncoding) {
     });
 
     EXPECT_TRUE(nextCalled);
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Accept-Encoding"), std::string::npos);
 }
 

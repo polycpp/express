@@ -4,8 +4,8 @@
  */
 
 #include <gtest/gtest.h>
-#include <polycpp/backend/event_context.hpp>
-#include <polycpp/backend/tcp_socket.hpp>
+#include <polycpp/io/event_context.hpp>
+#include <polycpp/io/tcp_socket.hpp>
 #include <polycpp/event_loop.hpp>
 #include <polycpp/express/express.hpp>
 #include <polycpp/negotiate/detail/aggregator.hpp>
@@ -22,7 +22,7 @@ namespace edetail = polycpp::express::detail;
 class ResponseTestFixture {
 public:
     ResponseTestFixture(const std::string& method, const std::string& url,
-                        const polycpp::JsonObject& headers = {},
+                        const polycpp::http::Headers& headers = {},
                         Application* app = nullptr)
         : msg_(), res_(createSocket(), "", 1, false) {
         msg_.method() = method;
@@ -42,9 +42,8 @@ public:
     polycpp::http::IncomingMessage& rawReq() { return msg_; }
 
 private:
-    static std::shared_ptr<polycpp::backend::TcpSocket> createSocket() {
-        auto& ctx = polycpp::EventLoop::instance().context();
-        return std::make_shared<polycpp::backend::TcpSocket>(ctx);
+    static polycpp::net::Socket createSocket() {
+        return polycpp::net::Socket();
     }
 
     polycpp::http::IncomingMessage msg_;
@@ -52,6 +51,22 @@ private:
     std::unique_ptr<Request> req_;
     std::unique_ptr<Response> resp_;
 };
+
+// Helper: extract getHeader() result as std::string (returns "" for non-string/array values)
+static std::string getHeaderStr(polycpp::http::ServerResponse& res, const std::string& name) {
+    auto val = res.getHeader(name);
+    if (val.isString()) return val.asString();
+    if (val.isArray()) {
+        // Join array values with ", " (e.g., multiple Set-Cookie values)
+        std::string result;
+        for (const auto& item : val.asArray()) {
+            if (!result.empty()) result += ", ";
+            if (item.isString()) result += item.asString();
+        }
+        return result;
+    }
+    return {};
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // res.send() Tests
@@ -61,7 +76,7 @@ TEST(ResponseSendTest, SendStringSetsContentTypeToHtml) {
     ResponseTestFixture f("GET", "/");
     f.res().send("Hello World");
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/html; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/html; charset=utf-8");
 }
 
 TEST(ResponseSendTest, SendBufferSetsContentTypeToOctetStream) {
@@ -69,7 +84,7 @@ TEST(ResponseSendTest, SendBufferSetsContentTypeToOctetStream) {
     auto buf = polycpp::Buffer::from("binary data");
     f.res().send(buf);
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/octet-stream");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/octet-stream");
 }
 
 TEST(ResponseSendTest, SendSetsContentLength) {
@@ -77,7 +92,7 @@ TEST(ResponseSendTest, SendSetsContentLength) {
     std::string body = "Hello";
     f.res().send(body);
 
-    auto cl = f.rawRes().getHeader("Content-Length");
+    auto cl = getHeaderStr(f.rawRes(),"Content-Length");
     EXPECT_EQ(cl, "5");
 }
 
@@ -86,8 +101,8 @@ TEST(ResponseSendTest, SendEmptyString) {
     f.res().send("");
 
     // Even an empty body should set Content-Type
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/html; charset=utf-8");
-    EXPECT_EQ(f.rawRes().getHeader("Content-Length"), "0");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/html; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Length"), "0");
 }
 
 TEST(ResponseSendTest, SendWithPreSetContentTypeDoesNotOverride) {
@@ -95,7 +110,7 @@ TEST(ResponseSendTest, SendWithPreSetContentTypeDoesNotOverride) {
     f.res().set("Content-Type", "text/plain");
     f.res().send("Hello");
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/plain");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/plain");
 }
 
 TEST(ResponseSendTest, HeadRequestSetsHeadersButNoBody) {
@@ -103,8 +118,8 @@ TEST(ResponseSendTest, HeadRequestSetsHeadersButNoBody) {
     f.res().send("This body should not be sent");
 
     // Headers should be set
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/html; charset=utf-8");
-    auto cl = f.rawRes().getHeader("Content-Length");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/html; charset=utf-8");
+    auto cl = getHeaderStr(f.rawRes(),"Content-Length");
     EXPECT_FALSE(cl.empty());
 }
 
@@ -112,7 +127,7 @@ TEST(ResponseSendTest, SendGeneratesETag) {
     ResponseTestFixture f("GET", "/");
     f.res().send("Hello World");
 
-    auto etag = f.rawRes().getHeader("ETag");
+    auto etag = getHeaderStr(f.rawRes(),"ETag");
     EXPECT_FALSE(etag.empty());
     EXPECT_TRUE(etag.starts_with("W/\""));
 }
@@ -122,7 +137,7 @@ TEST(ResponseSendTest, SendBufferSetsContentLengthCorrectly) {
     auto buf = polycpp::Buffer::from("12345");
     f.res().send(buf);
 
-    auto cl = f.rawRes().getHeader("Content-Length");
+    auto cl = getHeaderStr(f.rawRes(),"Content-Length");
     EXPECT_EQ(cl, "5");
 }
 
@@ -134,7 +149,7 @@ TEST(ResponseJsonTest, JsonEmptyObjectSetsContentType) {
     ResponseTestFixture f("GET", "/");
     f.res().json(polycpp::JsonObject{});
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/json; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/json; charset=utf-8");
 }
 
 TEST(ResponseJsonTest, JsonNestedObjects) {
@@ -143,10 +158,10 @@ TEST(ResponseJsonTest, JsonNestedObjects) {
     polycpp::JsonObject outer = {{"nested", polycpp::JsonValue(inner)}};
     f.res().json(polycpp::JsonValue(outer));
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_EQ(ct, "application/json; charset=utf-8");
     // Content-Length should be set
-    EXPECT_FALSE(f.rawRes().getHeader("Content-Length").empty());
+    EXPECT_FALSE(getHeaderStr(f.rawRes(),"Content-Length").empty());
 }
 
 TEST(ResponseJsonTest, JsonArray) {
@@ -154,14 +169,14 @@ TEST(ResponseJsonTest, JsonArray) {
     polycpp::JsonArray arr = {1.0, 2.0, 3.0};
     f.res().json(polycpp::JsonValue(arr));
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/json; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/json; charset=utf-8");
 }
 
 TEST(ResponseJsonTest, JsonNull) {
     ResponseTestFixture f("GET", "/");
     f.res().json(polycpp::JsonValue());
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/json; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/json; charset=utf-8");
 }
 
 TEST(ResponseJsonTest, JsonWithPreSetContentTypeDoesNotOverride) {
@@ -169,14 +184,14 @@ TEST(ResponseJsonTest, JsonWithPreSetContentTypeDoesNotOverride) {
     f.res().set("Content-Type", "application/vnd.api+json");
     f.res().json(polycpp::JsonObject{{"key", "val"}});
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/vnd.api+json");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/vnd.api+json");
 }
 
 TEST(ResponseJsonTest, JsonSetsContentLength) {
     ResponseTestFixture f("GET", "/");
     f.res().json(polycpp::JsonObject{{"a", "b"}});
 
-    auto cl = f.rawRes().getHeader("Content-Length");
+    auto cl = getHeaderStr(f.rawRes(),"Content-Length");
     EXPECT_FALSE(cl.empty());
     // The JSON body should be {"a":"b"}, length depends on JSON::stringify format
     int len = std::stoi(cl);
@@ -188,8 +203,8 @@ TEST(ResponseJsonTest, HeadRequestSendsNoBody) {
     f.res().json(polycpp::JsonObject{{"key", "value"}});
 
     // Headers should still be set
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/json; charset=utf-8");
-    EXPECT_FALSE(f.rawRes().getHeader("Content-Length").empty());
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/json; charset=utf-8");
+    EXPECT_FALSE(getHeaderStr(f.rawRes(),"Content-Length").empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -201,15 +216,15 @@ TEST(ResponseJsonpTest, JsonpWithoutCallbackSameAsJson) {
     f.res().jsonp(polycpp::JsonObject{{"key", "value"}});
 
     // Without callback, should act like json
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/json; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/json; charset=utf-8");
 }
 
 TEST(ResponseJsonpTest, JsonpWithCallbackParameter) {
     ResponseTestFixture f("GET", "/api?callback=myFunc");
     f.res().jsonp(polycpp::JsonObject{{"key", "value"}});
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/javascript; charset=utf-8");
-    EXPECT_EQ(f.rawRes().getHeader("X-Content-Type-Options"), "nosniff");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/javascript; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"X-Content-Type-Options"), "nosniff");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -221,8 +236,8 @@ TEST(ResponseSendStatusTest, SendStatus200SendsOK) {
     f.res().sendStatus(200);
 
     EXPECT_EQ(f.rawRes().statusCode(), 200);
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/plain; charset=utf-8");
-    EXPECT_EQ(f.rawRes().getHeader("Content-Length"), "2");  // "OK" is 2 chars
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/plain; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Length"), "2");  // "OK" is 2 chars
 }
 
 TEST(ResponseSendStatusTest, SendStatus404SendsNotFound) {
@@ -230,7 +245,7 @@ TEST(ResponseSendStatusTest, SendStatus404SendsNotFound) {
     f.res().sendStatus(404);
 
     EXPECT_EQ(f.rawRes().statusCode(), 404);
-    EXPECT_EQ(f.rawRes().getHeader("Content-Length"), "9");  // "Not Found" is 9 chars
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Length"), "9");  // "Not Found" is 9 chars
 }
 
 TEST(ResponseSendStatusTest, SendStatus500SendsInternalServerError) {
@@ -238,7 +253,7 @@ TEST(ResponseSendStatusTest, SendStatus500SendsInternalServerError) {
     f.res().sendStatus(500);
 
     EXPECT_EQ(f.rawRes().statusCode(), 500);
-    EXPECT_EQ(f.rawRes().getHeader("Content-Length"), "21");  // "Internal Server Error" is 21 chars
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Length"), "21");  // "Internal Server Error" is 21 chars
 }
 
 TEST(ResponseSendStatusTest, SendStatus201SendsCreated) {
@@ -246,7 +261,7 @@ TEST(ResponseSendStatusTest, SendStatus201SendsCreated) {
     f.res().sendStatus(201);
 
     EXPECT_EQ(f.rawRes().statusCode(), 201);
-    EXPECT_EQ(f.rawRes().getHeader("Content-Length"), "7");  // "Created" is 7 chars
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Length"), "7");  // "Created" is 7 chars
 }
 
 TEST(ResponseSendStatusTest, SendStatus204SendsNoContent) {
@@ -254,7 +269,7 @@ TEST(ResponseSendStatusTest, SendStatus204SendsNoContent) {
     f.res().sendStatus(204);
 
     EXPECT_EQ(f.rawRes().statusCode(), 204);
-    EXPECT_EQ(f.rawRes().getHeader("Content-Length"), "10");  // "No Content" is 10 chars
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Length"), "10");  // "No Content" is 10 chars
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -266,7 +281,7 @@ TEST(ResponseRedirectTest, RedirectDefaultsTo302) {
     f.res().redirect("/new-location");
 
     EXPECT_EQ(f.rawRes().statusCode(), 302);
-    EXPECT_EQ(f.rawRes().getHeader("Location"), "/new-location");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Location"), "/new-location");
 }
 
 TEST(ResponseRedirectTest, RedirectWithCustomStatus) {
@@ -274,21 +289,21 @@ TEST(ResponseRedirectTest, RedirectWithCustomStatus) {
     f.res().redirect(301, "/permanent");
 
     EXPECT_EQ(f.rawRes().statusCode(), 301);
-    EXPECT_EQ(f.rawRes().getHeader("Location"), "/permanent");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Location"), "/permanent");
 }
 
 TEST(ResponseRedirectTest, RedirectSetsContentType) {
     ResponseTestFixture f("GET", "/");
     f.res().redirect("/target");
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/html; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/html; charset=utf-8");
 }
 
 TEST(ResponseRedirectTest, RedirectEncodesUrl) {
     ResponseTestFixture f("GET", "/");
     f.res().redirect("/path with spaces");
 
-    EXPECT_EQ(f.rawRes().getHeader("Location"), "/path%20with%20spaces");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Location"), "/path%20with%20spaces");
 }
 
 TEST(ResponseRedirectTest, RedirectBackUsesReferer) {
@@ -296,7 +311,7 @@ TEST(ResponseRedirectTest, RedirectBackUsesReferer) {
     f.res().redirect("back");
 
     // Location should encode the referer URL
-    auto loc = f.rawRes().getHeader("Location");
+    auto loc = getHeaderStr(f.rawRes(),"Location");
     EXPECT_NE(loc.find("example.com"), std::string::npos);
 }
 
@@ -304,7 +319,7 @@ TEST(ResponseRedirectTest, RedirectBackWithNoRefererGoesToRoot) {
     ResponseTestFixture f("GET", "/");
     f.res().redirect("back");
 
-    EXPECT_EQ(f.rawRes().getHeader("Location"), "/");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Location"), "/");
 }
 
 TEST(ResponseRedirectTest, HeadRequestSetsHeadersNoBody) {
@@ -312,7 +327,7 @@ TEST(ResponseRedirectTest, HeadRequestSetsHeadersNoBody) {
     f.res().redirect("/new");
 
     EXPECT_EQ(f.rawRes().statusCode(), 302);
-    EXPECT_EQ(f.rawRes().getHeader("Location"), "/new");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Location"), "/new");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -323,7 +338,7 @@ TEST(ResponseTypeTest, TypeJsonSetsApplicationJson) {
     ResponseTestFixture f("GET", "/");
     f.res().type("json");
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("application/json"), std::string::npos);
 }
 
@@ -331,7 +346,7 @@ TEST(ResponseTypeTest, TypeHtmlSetsTextHtml) {
     ResponseTestFixture f("GET", "/");
     f.res().type("html");
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("text/html"), std::string::npos);
 }
 
@@ -339,14 +354,14 @@ TEST(ResponseTypeTest, TypeExactMimePassedThrough) {
     ResponseTestFixture f("GET", "/");
     f.res().type("application/json");
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/json");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/json");
 }
 
 TEST(ResponseTypeTest, TypeWithDotPrefix) {
     ResponseTestFixture f("GET", "/");
     f.res().type(".json");
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("application/json"), std::string::npos);
 }
 
@@ -354,7 +369,7 @@ TEST(ResponseTypeTest, ContentTypeIsAliasForType) {
     ResponseTestFixture f("GET", "/");
     f.res().contentType("json");
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("application/json"), std::string::npos);
 }
 
@@ -362,7 +377,7 @@ TEST(ResponseTypeTest, TypePng) {
     ResponseTestFixture f("GET", "/");
     f.res().type("png");
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("image/png"), std::string::npos);
 }
 
@@ -374,7 +389,7 @@ TEST(ResponseSetTest, SetSingleHeader) {
     ResponseTestFixture f("GET", "/");
     f.res().set("X-Custom", "my-value");
 
-    EXPECT_EQ(f.rawRes().getHeader("X-Custom"), "my-value");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"X-Custom"), "my-value");
 }
 
 TEST(ResponseSetTest, SetMultipleHeaders) {
@@ -384,15 +399,15 @@ TEST(ResponseSetTest, SetMultipleHeaders) {
         {"X-Custom-Two", "two"}
     });
 
-    EXPECT_EQ(f.rawRes().getHeader("X-Custom-One"), "one");
-    EXPECT_EQ(f.rawRes().getHeader("X-Custom-Two"), "two");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"X-Custom-One"), "one");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"X-Custom-Two"), "two");
 }
 
 TEST(ResponseSetTest, HeaderIsAliasForSet) {
     ResponseTestFixture f("GET", "/");
     f.res().header("X-Alias", "test-value");
 
-    EXPECT_EQ(f.rawRes().getHeader("X-Alias"), "test-value");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"X-Alias"), "test-value");
 }
 
 TEST(ResponseSetTest, GetHeader) {
@@ -419,7 +434,7 @@ TEST(ResponseAppendTest, AppendCreatesNewHeader) {
     ResponseTestFixture f("GET", "/");
     f.res().append("X-Custom", "value1");
 
-    EXPECT_EQ(f.rawRes().getHeader("X-Custom"), "value1");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"X-Custom"), "value1");
 }
 
 TEST(ResponseAppendTest, AppendToExistingHeaderAddsValue) {
@@ -427,7 +442,7 @@ TEST(ResponseAppendTest, AppendToExistingHeaderAddsValue) {
     f.res().set("X-Custom", "value1");
     f.res().append("X-Custom", "value2");
 
-    EXPECT_EQ(f.rawRes().getHeader("X-Custom"), "value1, value2");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"X-Custom"), "value1, value2");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -438,7 +453,7 @@ TEST(ResponseLinksTest, LinksSetsLinkHeader) {
     ResponseTestFixture f("GET", "/");
     f.res().links({{"next", "/users?page=2"}, {"last", "/users?page=5"}});
 
-    auto link = f.rawRes().getHeader("Link");
+    auto link = getHeaderStr(f.rawRes(),"Link");
     EXPECT_NE(link.find("/users?page=2"), std::string::npos);
     EXPECT_NE(link.find("rel=\"next\""), std::string::npos);
     EXPECT_NE(link.find("/users?page=5"), std::string::npos);
@@ -450,7 +465,7 @@ TEST(ResponseLinksTest, LinksAppendsToExisting) {
     f.res().links({{"next", "/page2"}});
     f.res().links({{"prev", "/page0"}});
 
-    auto link = f.rawRes().getHeader("Link");
+    auto link = getHeaderStr(f.rawRes(),"Link");
     EXPECT_NE(link.find("/page2"), std::string::npos);
     EXPECT_NE(link.find("/page0"), std::string::npos);
 }
@@ -463,7 +478,7 @@ TEST(ResponseCookieTest, CookieSetsSetCookieHeader) {
     ResponseTestFixture f("GET", "/");
     f.res().cookie("session", "abc123");
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("session=abc123"), std::string::npos);
 }
 
@@ -473,7 +488,7 @@ TEST(ResponseCookieTest, CookieWithHttpOnly) {
     opts.httpOnly = true;
     f.res().cookie("token", "xyz", opts);
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("token=xyz"), std::string::npos);
     EXPECT_NE(header.find("HttpOnly"), std::string::npos);
 }
@@ -484,7 +499,7 @@ TEST(ResponseCookieTest, CookieWithSecure) {
     opts.secure = true;
     f.res().cookie("token", "xyz", opts);
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("Secure"), std::string::npos);
 }
 
@@ -494,7 +509,7 @@ TEST(ResponseCookieTest, CookieWithPath) {
     opts.path = "/api";
     f.res().cookie("token", "xyz", opts);
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("Path=/api"), std::string::npos);
 }
 
@@ -504,7 +519,7 @@ TEST(ResponseCookieTest, CookieWithDomain) {
     opts.domain = "example.com";
     f.res().cookie("token", "xyz", opts);
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("Domain=example.com"), std::string::npos);
 }
 
@@ -514,7 +529,7 @@ TEST(ResponseCookieTest, CookieWithSameSite) {
     opts.sameSite = "Strict";
     f.res().cookie("token", "xyz", opts);
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("SameSite=Strict"), std::string::npos);
 }
 
@@ -524,7 +539,7 @@ TEST(ResponseCookieTest, CookieWithMaxAge) {
     opts.maxAge = std::chrono::milliseconds(3600000);  // 1 hour
     f.res().cookie("session", "abc", opts);
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("Max-Age=3600"), std::string::npos);
 }
 
@@ -532,7 +547,7 @@ TEST(ResponseCookieTest, ClearCookieSetsExpiry) {
     ResponseTestFixture f("GET", "/");
     f.res().clearCookie("session");
 
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_NE(header.find("session="), std::string::npos);
     // Should have Max-Age=0 or an Expires in the past
     bool hasMaxAge0 = header.find("Max-Age=0") != std::string::npos;
@@ -546,7 +561,7 @@ TEST(ResponseCookieTest, MultipleCookies) {
     f.res().cookie("name2", "val2");
 
     // Both cookies should be set via appendHeader
-    auto header = f.rawRes().getHeader("Set-Cookie");
+    auto header = getHeaderStr(f.rawRes(),"Set-Cookie");
     EXPECT_FALSE(header.empty());
 }
 
@@ -598,7 +613,7 @@ TEST(ResponseFormatTest, FormatAddsVaryAccept) {
         {"text/html", []() {}}
     });
 
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Accept"), std::string::npos);
 }
 
@@ -610,14 +625,14 @@ TEST(ResponseLocationTest, LocationSetsHeader) {
     ResponseTestFixture f("GET", "/");
     f.res().location("/users/1");
 
-    EXPECT_EQ(f.rawRes().getHeader("Location"), "/users/1");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Location"), "/users/1");
 }
 
 TEST(ResponseLocationTest, LocationEncodesUrl) {
     ResponseTestFixture f("GET", "/");
     f.res().location("/path with spaces");
 
-    EXPECT_EQ(f.rawRes().getHeader("Location"), "/path%20with%20spaces");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Location"), "/path%20with%20spaces");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -628,14 +643,14 @@ TEST(ResponseAttachmentTest, AttachmentWithNoFilename) {
     ResponseTestFixture f("GET", "/");
     f.res().attachment();
 
-    EXPECT_EQ(f.rawRes().getHeader("Content-Disposition"), "attachment");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Disposition"), "attachment");
 }
 
 TEST(ResponseAttachmentTest, AttachmentWithFilename) {
     ResponseTestFixture f("GET", "/");
     f.res().attachment("report.pdf");
 
-    auto cd = f.rawRes().getHeader("Content-Disposition");
+    auto cd = getHeaderStr(f.rawRes(),"Content-Disposition");
     EXPECT_NE(cd.find("attachment"), std::string::npos);
     EXPECT_NE(cd.find("filename=\"report.pdf\""), std::string::npos);
 }
@@ -644,7 +659,7 @@ TEST(ResponseAttachmentTest, AttachmentSetsContentType) {
     ResponseTestFixture f("GET", "/");
     f.res().attachment("photo.jpg");
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("image/jpeg"), std::string::npos);
 }
 
@@ -666,7 +681,7 @@ TEST(ResponseStatusTest, StatusChainWithSend) {
     f.res().status(201).send("Created!");
 
     EXPECT_EQ(f.rawRes().statusCode(), 201);
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "text/html; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "text/html; charset=utf-8");
 }
 
 TEST(ResponseStatusTest, StatusChainWithJson) {
@@ -674,7 +689,7 @@ TEST(ResponseStatusTest, StatusChainWithJson) {
     f.res().status(200).json(polycpp::JsonObject{{"ok", true}});
 
     EXPECT_EQ(f.rawRes().statusCode(), 200);
-    EXPECT_EQ(f.rawRes().getHeader("Content-Type"), "application/json; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Type"), "application/json; charset=utf-8");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -685,7 +700,7 @@ TEST(ResponseVaryTest, VarySetsHeader) {
     ResponseTestFixture f("GET", "/");
     f.res().vary("Accept");
 
-    EXPECT_EQ(f.rawRes().getHeader("Vary"), "Accept");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Vary"), "Accept");
 }
 
 TEST(ResponseVaryTest, VaryAppendsToExisting) {
@@ -693,7 +708,7 @@ TEST(ResponseVaryTest, VaryAppendsToExisting) {
     f.res().vary("Accept");
     f.res().vary("Accept-Encoding");
 
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Accept"), std::string::npos);
     EXPECT_NE(vary.find("Accept-Encoding"), std::string::npos);
 }
@@ -751,7 +766,7 @@ TEST(ResponseJsonpTest, InvalidCallbackFallsBackToJson) {
     resp.jsonp(polycpp::JsonObject{{"key", "value"}});
 
     // Since callback is invalid, should fall back to application/json
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("application/json"), std::string::npos);
 }
 
@@ -763,7 +778,7 @@ TEST(ResponseJsonpTest, ValidCallbackSetsJavascriptContentType) {
     auto& resp = f.res();
     resp.jsonp(polycpp::JsonObject{{"key", "value"}});
 
-    auto ct = f.rawRes().getHeader("Content-Type");
+    auto ct = getHeaderStr(f.rawRes(),"Content-Type");
     EXPECT_NE(ct.find("text/javascript"), std::string::npos);
 }
 
@@ -780,7 +795,7 @@ TEST(ResponseBugfixTest, SendBufferPreservesExactByteCount) {
         buf[i] = static_cast<uint8_t>(i);
     }
     f.res().send(buf);
-    auto cl = f.rawRes().getHeader("Content-Length");
+    auto cl = getHeaderStr(f.rawRes(),"Content-Length");
     // Content-Length must be 256 (not inflated by latin1 encoding)
     EXPECT_EQ(cl, "256");
 }
@@ -844,7 +859,7 @@ TEST(ResponseBugfixTest, SendFileRejectsNullByteInPath) {
 TEST(ResponseBugfixTest, NoETagForPostRequest) {
     ResponseTestFixture f("POST", "/", {{"host", "localhost"}});
     f.res().send("some body data");
-    auto etag = f.rawRes().getHeader("ETag");
+    auto etag = getHeaderStr(f.rawRes(),"ETag");
     EXPECT_TRUE(etag.empty());
 }
 
@@ -852,7 +867,7 @@ TEST(ResponseBugfixTest, NoETagForPostRequest) {
 TEST(ResponseBugfixTest, ETagGeneratedForGetRequest) {
     ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
     f.res().send("some body data");
-    auto etag = f.rawRes().getHeader("ETag");
+    auto etag = getHeaderStr(f.rawRes(),"ETag");
     EXPECT_FALSE(etag.empty());
 }
 
@@ -860,7 +875,7 @@ TEST(ResponseBugfixTest, ETagGeneratedForGetRequest) {
 TEST(ResponseBugfixTest, JsonGeneratesETag) {
     ResponseTestFixture f("GET", "/", {{"host", "localhost"}});
     f.res().json(polycpp::JsonObject{{"key", "value"}});
-    auto etag = f.rawRes().getHeader("ETag");
+    auto etag = getHeaderStr(f.rawRes(),"ETag");
     EXPECT_FALSE(etag.empty());
 }
 

@@ -16,10 +16,9 @@ namespace edetail = polycpp::express::detail;
 class MockRequestResponse {
 public:
     MockRequestResponse(const std::string& method, const std::string& url)
-        : msg_(), res_(msg_.socket(), "", 1, false) {
+        : msg_(), res_(polycpp::net::Socket()) {
         msg_.method() = method;
         msg_.url() = url;
-        msg_.headers() = polycpp::JsonObject{};
         req_ = std::make_unique<Request>(msg_, nullptr);
         resp_ = std::make_unique<Response>(res_, nullptr);
         req_->setRes(resp_.get());
@@ -495,7 +494,7 @@ TEST(RequestTest, MethodAndUrl) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "POST";
     msg.url() = "/api/data?key=value";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     EXPECT_EQ(req.method(), "POST");
@@ -506,7 +505,7 @@ TEST(RequestTest, PathExtraction) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/api/data?key=value#hash";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     // path() strips query string
@@ -517,7 +516,7 @@ TEST(RequestTest, QueryParsing) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/search?q=hello&page=2";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     auto q = req.query();
@@ -530,7 +529,7 @@ TEST(RequestTest, QueryEmpty) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/no-query";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     auto q = req.query();
@@ -542,7 +541,7 @@ TEST(RequestTest, HeaderAccess) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"content-type", "application/json"},
         {"accept", "text/html"}
     };
@@ -565,7 +564,7 @@ TEST(RequestTest, XhrDetection) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"x-requested-with", "XMLHttpRequest"}
     };
 
@@ -577,7 +576,7 @@ TEST(RequestTest, XhrDetectionFalse) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     EXPECT_FALSE(req.xhr());
@@ -588,7 +587,7 @@ TEST(RequestTest, ProtocolFromHeaderNoTrust) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"x-forwarded-proto", "https"}
     };
 
@@ -605,7 +604,7 @@ TEST(RequestTest, ProtocolFromHeaderWithTrust) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"x-forwarded-proto", "https"}
     };
 
@@ -618,7 +617,7 @@ TEST(RequestTest, ProtocolDefault) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     EXPECT_EQ(req.protocol(), "http");
@@ -630,7 +629,7 @@ TEST(RequestTest, IpsEmptyWithoutTrust) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"x-forwarded-for", "1.2.3.4, 5.6.7.8"}
     };
 
@@ -647,7 +646,7 @@ TEST(RequestTest, IpsFromForwardedWithTrust) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"x-forwarded-for", "1.2.3.4, 5.6.7.8"}
     };
 
@@ -666,7 +665,7 @@ TEST(RequestTest, HostnameFromHeader) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"host", "example.com:3000"}
     };
 
@@ -680,7 +679,7 @@ TEST(RequestTest, HostnameNoPort) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{
+    msg.headers() = polycpp::http::Headers{
         {"host", "example.com"}
     };
 
@@ -694,7 +693,7 @@ TEST(RequestTest, Params) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/users/42";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     req.params = polycpp::JsonObject{{"id", "42"}};
@@ -705,7 +704,7 @@ TEST(RequestTest, Body) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "POST";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     req.body = polycpp::JsonObject{{"name", "John"}, {"age", 30.0}};
@@ -717,7 +716,7 @@ TEST(RequestTest, StaleIsFreshInverse) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "POST";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     // POST is never fresh
@@ -729,7 +728,7 @@ TEST(RequestTest, BaseUrl) {
     polycpp::http::IncomingMessage msg;
     msg.method() = "GET";
     msg.url() = "/";
-    msg.headers() = polycpp::JsonObject{};
+    msg.headers() = polycpp::http::Headers{};
 
     Request req(msg, nullptr);
     EXPECT_EQ(req.baseUrl(), "");

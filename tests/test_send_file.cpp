@@ -10,8 +10,8 @@
 
 #include <gtest/gtest.h>
 
-#include <polycpp/backend/event_context.hpp>
-#include <polycpp/backend/tcp_socket.hpp>
+#include <polycpp/io/event_context.hpp>
+#include <polycpp/io/tcp_socket.hpp>
 #include <polycpp/event_loop.hpp>
 #include <polycpp/express/express.hpp>
 #include <polycpp/fs.hpp>
@@ -74,7 +74,6 @@ protected:
             : msg(), sres(createSocket(), "", 1, false) {
             msg.method() = method;
             msg.url() = url;
-            msg.headers() = polycpp::JsonObject{};
             req = std::make_unique<Request>(msg, nullptr);
             res = std::make_unique<Response>(sres, nullptr);
             req->setRes(res.get());
@@ -84,15 +83,12 @@ protected:
         }
 
         void setHeader(const std::string& name, const std::string& value) {
-            auto& hdrs = msg.headers();
-            auto lowerName = edetail::toLower(name);
-            hdrs.asObject()[lowerName] = value;
+            msg.headers().set(edetail::toLower(name), value);
         }
 
     private:
-        static std::shared_ptr<polycpp::backend::TcpSocket> createSocket() {
-            auto& ctx = polycpp::EventLoop::instance().context();
-            return std::make_shared<polycpp::backend::TcpSocket>(ctx);
+        static polycpp::net::Socket createSocket() {
+            return polycpp::net::Socket();
         }
     };
 
@@ -100,6 +96,21 @@ protected:
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+// Helper: extract getHeader() result as std::string
+static std::string getHeaderStr(polycpp::http::ServerResponse& res, const std::string& name) {
+    auto val = res.getHeader(name);
+    if (val.isString()) return val.asString();
+    if (val.isArray()) {
+        std::string result;
+        for (const auto& item : val.asArray()) {
+            if (!result.empty()) result += ", ";
+            if (item.isString()) result += item.asString();
+        }
+        return result;
+    }
+    return {};
+}
+
 // Utility Tests: httpDate, statEtag
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -144,7 +155,7 @@ TEST_F(SendFileTest, SetsCorrectContentTypeForTxt) {
     MockHttp http("GET", "/hello.txt");
     http.res->sendFile(testDir_ + "/hello.txt");
 
-    auto ct = http.sres.getHeader("Content-Type");
+    auto ct = getHeaderStr(http.sres,"Content-Type");
     EXPECT_TRUE(ct.find("text/plain") != std::string::npos);
 }
 
@@ -152,7 +163,7 @@ TEST_F(SendFileTest, SetsCorrectContentTypeForHtml) {
     MockHttp http("GET", "/index.html");
     http.res->sendFile(testDir_ + "/index.html");
 
-    auto ct = http.sres.getHeader("Content-Type");
+    auto ct = getHeaderStr(http.sres,"Content-Type");
     EXPECT_TRUE(ct.find("text/html") != std::string::npos);
 }
 
@@ -160,7 +171,7 @@ TEST_F(SendFileTest, SetsCorrectContentTypeForJson) {
     MockHttp http("GET", "/data.json");
     http.res->sendFile(testDir_ + "/data.json");
 
-    auto ct = http.sres.getHeader("Content-Type");
+    auto ct = getHeaderStr(http.sres,"Content-Type");
     EXPECT_TRUE(ct.find("application/json") != std::string::npos);
 }
 
@@ -172,7 +183,7 @@ TEST_F(SendFileTest, SetsContentLength) {
     MockHttp http("GET", "/hello.txt");
     http.res->sendFile(testDir_ + "/hello.txt");
 
-    auto cl = http.sres.getHeader("Content-Length");
+    auto cl = getHeaderStr(http.sres,"Content-Length");
     EXPECT_EQ(cl, "13"); // "Hello, World!" is 13 bytes
 }
 
@@ -184,7 +195,7 @@ TEST_F(SendFileTest, SetsLastModifiedHeader) {
     MockHttp http("GET", "/hello.txt");
     http.res->sendFile(testDir_ + "/hello.txt");
 
-    auto lm = http.sres.getHeader("Last-Modified");
+    auto lm = getHeaderStr(http.sres,"Last-Modified");
     EXPECT_FALSE(lm.empty());
     // Should be in RFC 7231 format ending with GMT
     EXPECT_TRUE(lm.find("GMT") != std::string::npos);
@@ -196,7 +207,7 @@ TEST_F(SendFileTest, OmitsLastModifiedWhenDisabled) {
     opts.lastModified = false;
     http.res->sendFile(testDir_ + "/hello.txt", opts);
 
-    auto lm = http.sres.getHeader("Last-Modified");
+    auto lm = getHeaderStr(http.sres,"Last-Modified");
     EXPECT_TRUE(lm.empty());
 }
 
@@ -208,7 +219,7 @@ TEST_F(SendFileTest, SetsETagHeader) {
     MockHttp http("GET", "/hello.txt");
     http.res->sendFile(testDir_ + "/hello.txt");
 
-    auto etag = http.sres.getHeader("ETag");
+    auto etag = getHeaderStr(http.sres,"ETag");
     EXPECT_FALSE(etag.empty());
     EXPECT_TRUE(etag.starts_with("W/\""));
 }
@@ -219,7 +230,7 @@ TEST_F(SendFileTest, OmitsETagWhenDisabled) {
     opts.etag = false;
     http.res->sendFile(testDir_ + "/hello.txt", opts);
 
-    auto etag = http.sres.getHeader("ETag");
+    auto etag = getHeaderStr(http.sres,"ETag");
     EXPECT_TRUE(etag.empty());
 }
 
@@ -231,7 +242,7 @@ TEST_F(SendFileTest, SetsAcceptRangesBytes) {
     MockHttp http("GET", "/hello.txt");
     http.res->sendFile(testDir_ + "/hello.txt");
 
-    auto ar = http.sres.getHeader("Accept-Ranges");
+    auto ar = getHeaderStr(http.sres,"Accept-Ranges");
     EXPECT_EQ(ar, "bytes");
 }
 
@@ -243,7 +254,7 @@ TEST_F(SendFileTest, Returns304WithIfNoneMatch) {
     // First request: get the ETag
     MockHttp http1("GET", "/hello.txt");
     http1.res->sendFile(testDir_ + "/hello.txt");
-    auto etag = http1.sres.getHeader("ETag");
+    auto etag = getHeaderStr(http1.sres,"ETag");
     ASSERT_FALSE(etag.empty());
 
     // Second request: send If-None-Match with that ETag
@@ -264,7 +275,7 @@ TEST_F(SendFileTest, Returns304WithIfModifiedSince) {
     SendFileOptions opts1;
     opts1.etag = false;
     http1.res->sendFile(testDir_ + "/hello.txt", opts1);
-    auto lm = http1.sres.getHeader("Last-Modified");
+    auto lm = getHeaderStr(http1.sres,"Last-Modified");
     ASSERT_FALSE(lm.empty());
 
     // Second request: send If-Modified-Since with the same Last-Modified value
@@ -295,7 +306,7 @@ TEST_F(SendFileTest, RangeRequestSetsContentRange) {
     http.setHeader("Range", "bytes=0-9");
     http.res->sendFile(testDir_ + "/range.txt");
 
-    auto cr = http.sres.getHeader("Content-Range");
+    auto cr = getHeaderStr(http.sres,"Content-Range");
     EXPECT_EQ(cr, "bytes 0-9/100");
 }
 
@@ -304,7 +315,7 @@ TEST_F(SendFileTest, RangeRequestSetsContentLength) {
     http.setHeader("Range", "bytes=0-9");
     http.res->sendFile(testDir_ + "/range.txt");
 
-    auto cl = http.sres.getHeader("Content-Length");
+    auto cl = getHeaderStr(http.sres,"Content-Length");
     EXPECT_EQ(cl, "10");
 }
 
@@ -314,7 +325,7 @@ TEST_F(SendFileTest, RangeRequestMiddleOfFile) {
     http.res->sendFile(testDir_ + "/range.txt");
 
     EXPECT_EQ(http.sres.statusCode(), 206);
-    auto cr = http.sres.getHeader("Content-Range");
+    auto cr = getHeaderStr(http.sres,"Content-Range");
     EXPECT_EQ(cr, "bytes 10-19/100");
 }
 
@@ -324,7 +335,7 @@ TEST_F(SendFileTest, RangeRequestSuffixRange) {
     http.res->sendFile(testDir_ + "/range.txt");
 
     EXPECT_EQ(http.sres.statusCode(), 206);
-    auto cr = http.sres.getHeader("Content-Range");
+    auto cr = getHeaderStr(http.sres,"Content-Range");
     EXPECT_EQ(cr, "bytes 90-99/100");
 }
 
@@ -338,7 +349,7 @@ TEST_F(SendFileTest, InvalidRangeReturns416) {
     http.res->sendFile(testDir_ + "/range.txt");
 
     EXPECT_EQ(http.sres.statusCode(), 416);
-    auto cr = http.sres.getHeader("Content-Range");
+    auto cr = getHeaderStr(http.sres,"Content-Range");
     EXPECT_EQ(cr, "bytes */100");
 }
 
@@ -371,7 +382,7 @@ TEST_F(SendFileTest, DotfilesAllowServes) {
     http.res->sendFile(testDir_ + "/.hidden", opts);
 
     // Should succeed (200 or similar, not 403/404)
-    auto cl = http.sres.getHeader("Content-Length");
+    auto cl = getHeaderStr(http.sres,"Content-Length");
     EXPECT_EQ(cl, "6"); // "secret" is 6 bytes
 }
 
@@ -385,8 +396,8 @@ TEST_F(SendFileTest, CustomHeadersFromOpts) {
     opts.headers = {{"X-Custom", "test-value"}, {"X-Another", "42"}};
     http.res->sendFile(testDir_ + "/hello.txt", opts);
 
-    EXPECT_EQ(http.sres.getHeader("X-Custom"), "test-value");
-    EXPECT_EQ(http.sres.getHeader("X-Another"), "42");
+    EXPECT_EQ(getHeaderStr(http.sres,"X-Custom"), "test-value");
+    EXPECT_EQ(getHeaderStr(http.sres,"X-Another"), "42");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -423,7 +434,7 @@ TEST_F(SendFileTest, SetsCacheControlWithMaxAge) {
     opts.maxAge = std::chrono::milliseconds(86400000); // 1 day
     http.res->sendFile(testDir_ + "/hello.txt", opts);
 
-    auto cc = http.sres.getHeader("Cache-Control");
+    auto cc = getHeaderStr(http.sres,"Cache-Control");
     EXPECT_EQ(cc, "public, max-age=86400");
 }
 
@@ -437,7 +448,7 @@ TEST_F(SendFileTest, ResolvesRelativeToRoot) {
     opts.root = testDir_;
     http.res->sendFile("hello.txt", opts);
 
-    auto cl = http.sres.getHeader("Content-Length");
+    auto cl = getHeaderStr(http.sres,"Content-Length");
     EXPECT_EQ(cl, "13");
 }
 
@@ -470,9 +481,9 @@ TEST_F(ServeStaticTest, ServesFileFromRoot) {
     middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
 
     EXPECT_FALSE(nextCalled);
-    auto ct = http.sres.getHeader("Content-Type");
+    auto ct = getHeaderStr(http.sres,"Content-Type");
     EXPECT_TRUE(ct.find("text/plain") != std::string::npos);
-    auto cl = http.sres.getHeader("Content-Length");
+    auto cl = getHeaderStr(http.sres,"Content-Length");
     EXPECT_EQ(cl, "13");
 }
 
@@ -488,7 +499,7 @@ TEST_F(ServeStaticTest, ServesIndexHtmlForDirectory) {
     middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
 
     EXPECT_FALSE(nextCalled);
-    auto ct = http.sres.getHeader("Content-Type");
+    auto ct = getHeaderStr(http.sres,"Content-Type");
     EXPECT_TRUE(ct.find("text/html") != std::string::npos);
 }
 
@@ -505,7 +516,7 @@ TEST_F(ServeStaticTest, SetsCacheControlWithMaxAge) {
     bool nextCalled = false;
     middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
 
-    auto cc = http.sres.getHeader("Cache-Control");
+    auto cc = getHeaderStr(http.sres,"Cache-Control");
     EXPECT_EQ(cc, "public, max-age=3600");
 }
 
@@ -520,7 +531,7 @@ TEST_F(ServeStaticTest, Returns304ForConditionalGet) {
     MockHttp http1("GET", "/hello.txt");
     bool next1 = false;
     middleware(*http1.req, *http1.res, [&](auto) { next1 = true; });
-    auto etag = http1.sres.getHeader("ETag");
+    auto etag = getHeaderStr(http1.sres,"ETag");
     ASSERT_FALSE(etag.empty());
 
     // Second request: conditional GET
@@ -543,7 +554,7 @@ TEST_F(ServeStaticTest, SetsLastModifiedHeader) {
     bool nextCalled = false;
     middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
 
-    auto lm = http.sres.getHeader("Last-Modified");
+    auto lm = getHeaderStr(http.sres,"Last-Modified");
     EXPECT_FALSE(lm.empty());
     EXPECT_TRUE(lm.find("GMT") != std::string::npos);
 }
@@ -559,7 +570,7 @@ TEST_F(ServeStaticTest, SetsAcceptRangesHeader) {
     bool nextCalled = false;
     middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
 
-    auto ar = http.sres.getHeader("Accept-Ranges");
+    auto ar = getHeaderStr(http.sres,"Accept-Ranges");
     EXPECT_EQ(ar, "bytes");
 }
 
@@ -574,7 +585,7 @@ TEST_F(ServeStaticTest, SetsETagHeader) {
     bool nextCalled = false;
     middleware(*http.req, *http.res, [&](auto) { nextCalled = true; });
 
-    auto etag = http.sres.getHeader("ETag");
+    auto etag = getHeaderStr(http.sres,"ETag");
     EXPECT_FALSE(etag.empty());
     EXPECT_TRUE(etag.starts_with("W/\""));
 }
@@ -593,7 +604,7 @@ TEST_F(ServeStaticTest, RangeRequestReturns206) {
 
     EXPECT_FALSE(nextCalled);
     EXPECT_EQ(http.sres.statusCode(), 206);
-    auto cr = http.sres.getHeader("Content-Range");
+    auto cr = getHeaderStr(http.sres,"Content-Range");
     EXPECT_EQ(cr, "bytes 0-9/100");
 }
 
@@ -727,7 +738,7 @@ TEST_F(SendFileTest, FreshReturnsFalseFor500Status) {
     // First request: get the ETag
     MockHttp http1("GET", "/hello.txt");
     http1.res->sendFile(testDir_ + "/hello.txt");
-    auto etag = http1.sres.getHeader("ETag");
+    auto etag = getHeaderStr(http1.sres,"ETag");
     ASSERT_FALSE(etag.empty());
 
     // Second request: set matching ETag but force 500 status
@@ -806,7 +817,7 @@ TEST_F(SendFileTest, MalformedRangeHeaderServesFullFile) {
 
     // Should serve the full file (200), not 416
     EXPECT_EQ(http.sres.statusCode(), 200);
-    auto cl = http.sres.getHeader("Content-Length");
+    auto cl = getHeaderStr(http.sres,"Content-Length");
     EXPECT_EQ(cl, "100");
 }
 
@@ -820,6 +831,6 @@ TEST_F(ServeStaticTest, MalformedRangeHeaderServesFullFile) {
 
     EXPECT_FALSE(nextCalled);
     EXPECT_EQ(http.sres.statusCode(), 200);
-    auto cl = http.sres.getHeader("Content-Length");
+    auto cl = getHeaderStr(http.sres,"Content-Length");
     EXPECT_EQ(cl, "100");
 }

@@ -91,17 +91,7 @@ public:
      * @since 0.1.0
      */
     std::optional<std::string> get(const std::string& name) const {
-        auto lowerName = detail::toLower(name);
-        const auto& hdrs = raw_.headers();
-        if (hdrs.isObject()) {
-            auto it = hdrs.asObject().find(lowerName);
-            if (it != hdrs.asObject().end()) {
-                if (it->second.isString()) {
-                    return it->second.asString();
-                }
-            }
-        }
-        return std::nullopt;
+        return raw_.headers().get(name);
     }
 
     /**
@@ -358,7 +348,7 @@ public:
     const std::string& httpVersion() const { return raw_.httpVersion(); }
 
     /** @brief Get all headers. @since 0.1.0 */
-    const JsonValue& headers() const { return raw_.headers(); }
+    const polycpp::http::Headers& headers() const { return raw_.headers(); }
 
     // ── Context ──────────────────────────────────────────────────────
 
@@ -391,7 +381,7 @@ public:
     std::string socketAddr() const {
         auto sock = raw_.socket();
         if (sock) {
-            return sock->remoteAddress();
+            return sock->remoteAddress().value_or("");
         }
         return "";
     }

@@ -7,8 +7,8 @@
  */
 
 #include <gtest/gtest.h>
-#include <polycpp/backend/event_context.hpp>
-#include <polycpp/backend/tcp_socket.hpp>
+#include <polycpp/io/event_context.hpp>
+#include <polycpp/io/tcp_socket.hpp>
 #include <polycpp/event_loop.hpp>
 #include <polycpp/express/express.hpp>
 #include <polycpp/negotiate/detail/aggregator.hpp>
@@ -24,7 +24,7 @@ using namespace polycpp::express;
 class IntegrationMock {
 public:
     IntegrationMock(const std::string& method, const std::string& url,
-                    const polycpp::JsonObject& headers = {},
+                    const polycpp::http::Headers& headers = {},
                     const std::string& bodyContent = "",
                     Application* app = nullptr)
         : msg_(), res_(createSocket(), "", 1, false) {
@@ -32,7 +32,8 @@ public:
         msg_.url() = url;
         msg_.headers() = headers;
         if (!bodyContent.empty()) {
-            msg_.body() = polycpp::Buffer::from(bodyContent);
+            msg_.impl()->push(polycpp::Buffer::from(bodyContent));
+            msg_.impl()->push(std::nullopt);
         }
         res_.on("error", [](const std::vector<std::any>&) {});
         req_ = std::make_unique<Request>(msg_, app);
@@ -46,9 +47,8 @@ public:
     polycpp::http::ServerResponse& rawRes() { return res_; }
 
 private:
-    static std::shared_ptr<polycpp::backend::TcpSocket> createSocket() {
-        auto& ctx = polycpp::EventLoop::instance().context();
-        return std::make_shared<polycpp::backend::TcpSocket>(ctx);
+    static polycpp::net::Socket createSocket() {
+        return polycpp::net::Socket();
     }
 
     polycpp::http::IncomingMessage msg_;
@@ -56,6 +56,21 @@ private:
     std::unique_ptr<Request> req_;
     std::unique_ptr<Response> resp_;
 };
+
+// Helper: extract getHeader() result as std::string
+static std::string getHeaderStr(polycpp::http::ServerResponse& res, const std::string& name) {
+    auto val = res.getHeader(name);
+    if (val.isString()) return val.asString();
+    if (val.isArray()) {
+        std::string result;
+        for (const auto& item : val.asArray()) {
+            if (!result.empty()) result += ", ";
+            if (item.isString()) result += item.asString();
+        }
+        return result;
+    }
+    return {};
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Basic Routing Tests
@@ -74,7 +89,7 @@ TEST(IntegrationRoutingTest, GetRouteReturnsCorrectResponse) {
     app.router().handle(mock.req(), mock.res(), [](std::optional<HttpError>) {});
 
     EXPECT_TRUE(handlerCalled);
-    EXPECT_EQ(mock.rawRes().getHeader("Content-Type"), "text/html; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(mock.rawRes(),"Content-Type"), "text/html; charset=utf-8");
 }
 
 TEST(IntegrationRoutingTest, PostRouteWithBody) {
@@ -242,7 +257,7 @@ TEST(IntegrationMiddlewareTest, MiddlewareCanModifyResponse) {
     IntegrationMock mock("GET", "/test");
     app.router().handle(mock.req(), mock.res(), [](std::optional<HttpError>) {});
 
-    EXPECT_EQ(mock.rawRes().getHeader("X-Custom-Header"), "middleware-value");
+    EXPECT_EQ(getHeaderStr(mock.rawRes(),"X-Custom-Header"), "middleware-value");
 }
 
 TEST(IntegrationMiddlewareTest, NextPassesToNextMiddleware) {
@@ -706,7 +721,7 @@ TEST(IntegrationBodyParserTest, JsonBodyParserWithRouting) {
 
     EXPECT_EQ(capturedName, "Bob");
     EXPECT_EQ(mock.rawRes().statusCode(), 201);
-    EXPECT_EQ(mock.rawRes().getHeader("Content-Type"), "application/json; charset=utf-8");
+    EXPECT_EQ(getHeaderStr(mock.rawRes(),"Content-Type"), "application/json; charset=utf-8");
 }
 
 TEST(IntegrationBodyParserTest, UrlencodedBodyParserWithRouting) {

@@ -166,9 +166,9 @@ inline bool Request::fresh() const {
 
         std::map<std::string, std::string> resHeaders;
         auto etag = res_->raw().getHeader("etag");
-        if (!etag.empty()) resHeaders["etag"] = etag;
+        if (etag.isString()) resHeaders["etag"] = etag.asString();
         auto lm = res_->raw().getHeader("last-modified");
-        if (!lm.empty()) resHeaders["last-modified"] = lm;
+        if (lm.isString()) resHeaders["last-modified"] = lm.asString();
 
         return detail::isFresh(reqHeaders, resHeaders);
     }

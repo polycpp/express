@@ -335,8 +335,8 @@ public:
      */
     std::optional<std::string> get(const std::string& field) const {
         auto val = raw_.getHeader(field);
-        if (val.empty()) return std::nullopt;
-        return val;
+        if (!val.isString()) return std::nullopt;
+        return val.asString();
     }
 
     /**
@@ -352,11 +352,11 @@ public:
     Response& append(const std::string& field, const std::string& value) {
         detail::validateHeaderName(field);
         detail::validateHeaderValue(field, value);
-        auto existing = raw_.getHeader(field);
-        if (existing.empty()) {
+        auto existingVal = raw_.getHeader(field);
+        if (!existingVal.isString()) {
             raw_.setHeader(field, value);
         } else {
-            raw_.setHeader(field, existing + ", " + value);
+            raw_.setHeader(field, existingVal.asString() + ", " + value);
         }
         return *this;
     }
@@ -434,9 +434,9 @@ public:
             if (!header.empty()) header += ", ";
             header += "<" + href + ">; rel=\"" + rel + "\"";
         }
-        auto existing = raw_.getHeader("Link");
-        if (!existing.empty()) {
-            header = existing + ", " + header;
+        auto existingVal = raw_.getHeader("Link");
+        if (existingVal.isString()) {
+            header = existingVal.asString() + ", " + header;
         }
         detail::validateHeaderValue("Link", header);
         raw_.setHeader("Link", header);
@@ -940,7 +940,8 @@ private:
         }
 
         // Get Content-Type and check if it's compressible
-        auto contentType = raw_.getHeader("Content-Type");
+        auto contentTypeVal = raw_.getHeader("Content-Type");
+        std::string contentType = contentTypeVal.isString() ? contentTypeVal.asString() : std::string{};
 
         // Build filter vector from locals
         std::vector<std::string> filter;
@@ -959,8 +960,8 @@ private:
         }
 
         // Don't compress if Content-Encoding is already set
-        auto existingEncoding = raw_.getHeader("Content-Encoding");
-        if (!existingEncoding.empty()) {
+        auto existingEncodingVal = raw_.getHeader("Content-Encoding");
+        if (existingEncodingVal.isString() && !existingEncodingVal.asString().empty()) {
             return std::nullopt;
         }
 

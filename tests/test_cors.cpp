@@ -15,8 +15,8 @@ using namespace polycpp::express;
 class CorsTestFixture {
 public:
     CorsTestFixture(const std::string& method, const std::string& url,
-                    const polycpp::JsonObject& headers = {})
-        : msg_(), res_(msg_.socket(), "", 1, false) {
+                    const polycpp::http::Headers& headers = {})
+        : msg_(), res_(polycpp::net::Socket()) {
         msg_.method() = method;
         msg_.url() = url;
         msg_.headers() = headers;
@@ -37,6 +37,21 @@ private:
     std::unique_ptr<Response> resp_;
 };
 
+// Helper: extract getHeader() result as std::string
+static std::string getHeaderStr(polycpp::http::ServerResponse& res, const std::string& name) {
+    auto val = res.getHeader(name);
+    if (val.isString()) return val.asString();
+    if (val.isArray()) {
+        std::string result;
+        for (const auto& item : val.asArray()) {
+            if (!result.empty()) result += ", ";
+            if (item.isString()) result += item.asString();
+        }
+        return result;
+    }
+    return {};
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Default CORS: reflects Origin, allows all methods
 // ═══════════════════════════════════════════════════════════════════════
@@ -51,10 +66,10 @@ TEST(CorsTest, DefaultReflectsOrigin) {
     });
 
     EXPECT_TRUE(nextCalled);
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"),
               "https://example.com");
     // Vary: Origin should be set
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Origin"), std::string::npos);
 }
 
@@ -68,7 +83,7 @@ TEST(CorsTest, DefaultAllowsAllMethods) {
     auto handler = cors({.preflightContinue = true});
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    auto methods = f.rawRes().getHeader("Access-Control-Allow-Methods");
+    auto methods = getHeaderStr(f.rawRes(),"Access-Control-Allow-Methods");
     EXPECT_NE(methods.find("GET"), std::string::npos);
     EXPECT_NE(methods.find("POST"), std::string::npos);
     EXPECT_NE(methods.find("PUT"), std::string::npos);
@@ -92,9 +107,9 @@ TEST(CorsTest, SpecificOriginString) {
 
     EXPECT_TRUE(nextCalled);
     // Should set the configured origin, not the request origin
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"),
               "https://example.com");
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Origin"), std::string::npos);
 }
 
@@ -108,9 +123,9 @@ TEST(CorsTest, WildcardOriginNoVary) {
     });
 
     EXPECT_TRUE(nextCalled);
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"), "*");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"), "*");
     // Wildcard should NOT add Vary: Origin
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_EQ(vary.find("Origin"), std::string::npos);
 }
 
@@ -134,9 +149,9 @@ TEST(CorsTest, OriginArrayMatchFound) {
     });
 
     EXPECT_TRUE(nextCalled);
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"),
               "https://b.com");
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Origin"), std::string::npos);
 }
 
@@ -156,7 +171,7 @@ TEST(CorsTest, OriginNotInWhitelist) {
 
     EXPECT_TRUE(nextCalled);
     // No Allow-Origin should be set
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -169,8 +184,8 @@ TEST(CorsTest, CredentialsTrue) {
     auto handler = cors({.credentials = true});
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Credentials"), "true");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Credentials"), "true");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"),
               "https://example.com");
 }
 
@@ -180,7 +195,7 @@ TEST(CorsTest, CredentialsFalseByDefault) {
     auto handler = cors();
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Credentials"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Credentials"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -201,9 +216,9 @@ TEST(CorsTest, PreflightSetsAllHeaders) {
     });
 
     EXPECT_TRUE(nextCalled);
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"),
               "https://example.com");
-    auto methods = f.rawRes().getHeader("Access-Control-Allow-Methods");
+    auto methods = getHeaderStr(f.rawRes(),"Access-Control-Allow-Methods");
     EXPECT_NE(methods.find("GET"), std::string::npos);
     EXPECT_NE(methods.find("POST"), std::string::npos);
 }
@@ -262,9 +277,9 @@ TEST(CorsTest, PreflightReflectsRequestHeaders) {
     auto handler = cors({.preflightContinue = true});
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Headers"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Headers"),
               "X-Custom, Authorization");
-    auto vary = f.rawRes().getHeader("Vary");
+    auto vary = getHeaderStr(f.rawRes(),"Vary");
     EXPECT_NE(vary.find("Access-Control-Request-Headers"), std::string::npos);
 }
 
@@ -281,7 +296,7 @@ TEST(CorsTest, PreflightCustomAllowedHeaders) {
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
     // Should use the configured headers, not reflect the request headers
-    auto allowed = f.rawRes().getHeader("Access-Control-Allow-Headers");
+    auto allowed = getHeaderStr(f.rawRes(),"Access-Control-Allow-Headers");
     EXPECT_EQ(allowed, "Content-Type,Authorization");
 }
 
@@ -298,7 +313,7 @@ TEST(CorsTest, PreflightWithMaxAge) {
     auto handler = cors({.maxAge = 86400, .preflightContinue = true});
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Max-Age"), "86400");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Max-Age"), "86400");
 }
 
 TEST(CorsTest, NoMaxAgeByDefault) {
@@ -310,7 +325,7 @@ TEST(CorsTest, NoMaxAgeByDefault) {
     auto handler = cors({.preflightContinue = true});
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Max-Age"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Max-Age"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -325,7 +340,7 @@ TEST(CorsTest, ExposedHeaders) {
     });
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Expose-Headers"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Expose-Headers"),
               "X-Request-Id,X-Total-Count");
 }
 
@@ -335,7 +350,7 @@ TEST(CorsTest, NoExposedHeadersByDefault) {
     auto handler = cors();
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Expose-Headers"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Expose-Headers"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -353,7 +368,7 @@ TEST(CorsTest, NoOriginHeaderNoCorsHeaders) {
 
     EXPECT_TRUE(nextCalled);
     // No Origin means allowOrigin is "" (empty), so no header is set
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -374,10 +389,10 @@ TEST(CorsTest, PreflightContinueCallsNext) {
 
     EXPECT_TRUE(nextCalled);
     // CORS headers should still be set
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"),
               "https://example.com");
     // Content-Length should NOT be set (response not ended by middleware)
-    EXPECT_EQ(f.rawRes().getHeader("Content-Length"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Content-Length"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -394,8 +409,8 @@ TEST(CorsTest, OriginDisabled) {
     });
 
     EXPECT_TRUE(nextCalled);
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"), "");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Credentials"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Credentials"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -411,7 +426,7 @@ TEST(CorsTest, CustomMethods) {
     auto handler = cors({.methods = {"GET", "POST"}, .preflightContinue = true});
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Methods"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Methods"),
               "GET,POST");
 }
 
@@ -426,9 +441,9 @@ TEST(CorsTest, NonPreflightNoMethodsHeader) {
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
     // Non-OPTIONS requests should NOT get Allow-Methods
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Methods"), "");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Headers"), "");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Max-Age"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Methods"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Headers"), "");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Max-Age"), "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -456,16 +471,16 @@ TEST(CorsTest, FullConfiguration) {
     });
     handler(f.req(), f.res(), [&](std::optional<HttpError>) {});
 
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Origin"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Origin"),
               "https://app.example.com");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Credentials"), "true");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Expose-Headers"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Credentials"), "true");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Expose-Headers"),
               "X-Request-Id");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Methods"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Methods"),
               "GET,PUT,DELETE");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Allow-Headers"),
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Allow-Headers"),
               "Content-Type,X-Token");
-    EXPECT_EQ(f.rawRes().getHeader("Access-Control-Max-Age"), "3600");
+    EXPECT_EQ(getHeaderStr(f.rawRes(),"Access-Control-Max-Age"), "3600");
 }
 
 // ═══════════════════════════════════════════════════════════════════════

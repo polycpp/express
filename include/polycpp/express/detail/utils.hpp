@@ -414,7 +414,8 @@ inline bool isFresh(const std::map<std::string, std::string>& reqHeaders,
  * @since 0.1.0
  */
 inline void varyAppend(http::ServerResponse& res, const std::string& field) {
-    auto existing = res.getHeader("Vary");
+    auto existingVal = res.getHeader("Vary");
+    std::string existing = existingVal.isString() ? existingVal.asString() : std::string{};
     if (existing == "*") {
         return; // Already varies on everything
     }

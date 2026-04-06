@@ -4,8 +4,8 @@
  */
 
 #include <gtest/gtest.h>
-#include <polycpp/backend/event_context.hpp>
-#include <polycpp/backend/tcp_socket.hpp>
+#include <polycpp/io/event_context.hpp>
+#include <polycpp/io/tcp_socket.hpp>
 #include <polycpp/event_loop.hpp>
 #include <polycpp/express/express.hpp>
 #include <polycpp/negotiate/detail/aggregator.hpp>
@@ -19,14 +19,15 @@ using namespace polycpp::express;
 class BodyParserTestFixture {
 public:
     BodyParserTestFixture(const std::string& method, const std::string& url,
-                          const polycpp::JsonObject& headers = {},
+                          const polycpp::http::Headers& headers = {},
                           const std::string& bodyContent = "")
         : msg_(), res_(createSocket(), "", 1, false) {
         msg_.method() = method;
         msg_.url() = url;
         msg_.headers() = headers;
         if (!bodyContent.empty()) {
-            msg_.body() = polycpp::Buffer::from(bodyContent);
+            msg_.impl()->push(polycpp::Buffer::from(bodyContent));
+            msg_.impl()->push(std::nullopt);
         }
         res_.on("error", [](const std::vector<std::any>&) {});
         req_ = std::make_unique<Request>(msg_, nullptr);
@@ -41,9 +42,8 @@ public:
     polycpp::http::IncomingMessage& rawReq() { return msg_; }
 
 private:
-    static std::shared_ptr<polycpp::backend::TcpSocket> createSocket() {
-        auto& ctx = polycpp::EventLoop::instance().context();
-        return std::make_shared<polycpp::backend::TcpSocket>(ctx);
+    static polycpp::net::Socket createSocket() {
+        return polycpp::net::Socket();
     }
 
     polycpp::http::IncomingMessage msg_;
