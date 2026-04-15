@@ -33,9 +33,9 @@ public:
         msg_.headers() = headers;
         if (!bodyContent.empty()) {
             msg_.impl()->push(polycpp::Buffer::from(bodyContent));
-            msg_.impl()->push(std::nullopt);
         }
-        res_.on("error", [](const std::vector<std::any>&) {});
+        msg_.impl()->push(std::nullopt);
+        res_.on(polycpp::stream::event::Error_, [](const polycpp::Error&) {});
         req_ = std::make_unique<Request>(msg_, app);
         resp_ = std::make_unique<Response>(res_, app);
         req_->setRes(resp_.get());

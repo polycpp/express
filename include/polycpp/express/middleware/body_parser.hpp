@@ -38,6 +38,30 @@ inline std::string readBody(Request& req, int64_t limit) {
     auto& raw = req.raw();
     std::string body;
 
+    const auto contentLength = raw.headers().get("content-length");
+    const auto transferEncoding = raw.headers().get("transfer-encoding");
+    const bool hasFramedBody =
+        (contentLength && *contentLength != "0") ||
+        (transferEncoding && !transferEncoding->empty());
+
+    // Newer polycpp stream behavior does not always present an already-ended
+    // empty mock request as readable-ended. If the request has no body framing
+    // at all, treat it as an empty body instead of blocking in pollOnce().
+    if (!hasFramedBody) {
+        auto buf = raw.read();
+        if (buf.length() > 0) {
+            body.append(reinterpret_cast<const char*>(buf.data()), buf.length());
+            if (limit > 0 && static_cast<int64_t>(body.size()) > limit) {
+                throw HttpError::payloadTooLarge("Request body too large");
+            }
+        } else if (!raw.readableEnded()) {
+            return body;
+        }
+        if (raw.readableEnded()) {
+            return body;
+        }
+    }
+
     auto& ctx = polycpp::event_loop::EventLoop::instance().context();
     while (true) {
         auto buf = raw.read();

@@ -79,7 +79,7 @@ protected:
             req->setRes(res.get());
             res->setReq(req.get());
             // Suppress write errors on unconnected socket (test mock)
-            sres.on("error", [](const std::vector<std::any>&) {});
+            sres.on(polycpp::stream::event::Error_, [](const polycpp::Error&) {});
         }
 
         void setHeader(const std::string& name, const std::string& value) {
