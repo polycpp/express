@@ -40,16 +40,13 @@ private:
 // Helper: extract getHeader() result as std::string
 static std::string getHeaderStr(polycpp::http::ServerResponse& res, const std::string& name) {
     auto val = res.getHeader(name);
-    if (val.isString()) return val.asString();
-    if (val.isArray()) {
-        std::string result;
-        for (const auto& item : val.asArray()) {
-            if (!result.empty()) result += ", ";
-            if (item.isString()) result += item.asString();
-        }
-        return result;
+    if (val.empty()) return {};
+    std::string result = val.front();
+    for (size_t i = 1; i < val.size(); ++i) {
+        result += ", ";
+        result += val[i];
     }
-    return {};
+    return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

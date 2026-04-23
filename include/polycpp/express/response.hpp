@@ -335,8 +335,8 @@ public:
      */
     std::optional<std::string> get(const std::string& field) const {
         auto val = raw_.getHeader(field);
-        if (!val.isString()) return std::nullopt;
-        return val.asString();
+        if (val.empty()) return std::nullopt;
+        return val.front();
     }
 
     /**
@@ -353,10 +353,10 @@ public:
         detail::validateHeaderName(field);
         detail::validateHeaderValue(field, value);
         auto existingVal = raw_.getHeader(field);
-        if (!existingVal.isString()) {
+        if (existingVal.empty()) {
             raw_.setHeader(field, value);
         } else {
-            raw_.setHeader(field, existingVal.asString() + ", " + value);
+            raw_.setHeader(field, existingVal.front() + ", " + value);
         }
         return *this;
     }
@@ -435,8 +435,8 @@ public:
             header += "<" + href + ">; rel=\"" + rel + "\"";
         }
         auto existingVal = raw_.getHeader("Link");
-        if (existingVal.isString()) {
-            header = existingVal.asString() + ", " + header;
+        if (!existingVal.empty()) {
+            header = existingVal.front() + ", " + header;
         }
         detail::validateHeaderValue("Link", header);
         raw_.setHeader("Link", header);
@@ -941,7 +941,7 @@ private:
 
         // Get Content-Type and check if it's compressible
         auto contentTypeVal = raw_.getHeader("Content-Type");
-        std::string contentType = contentTypeVal.isString() ? contentTypeVal.asString() : std::string{};
+        std::string contentType = contentTypeVal.empty() ? std::string{} : contentTypeVal.front();
 
         // Build filter vector from locals
         std::vector<std::string> filter;
@@ -961,7 +961,7 @@ private:
 
         // Don't compress if Content-Encoding is already set
         auto existingEncodingVal = raw_.getHeader("Content-Encoding");
-        if (existingEncodingVal.isString() && !existingEncodingVal.asString().empty()) {
+        if (!existingEncodingVal.empty() && !existingEncodingVal.front().empty()) {
             return std::nullopt;
         }
 
