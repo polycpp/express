@@ -126,6 +126,6 @@ What you learned
   ``app.use(json())``. Without it,
   :cpp:member:`polycpp::express::Request::body` stays empty.
 - Cookies round-trip through
-  :cpp:func:`polycpp::express::Request::cookies` (read) and
+  :cpp:member:`polycpp::express::Request::cookies` (read) and
   :cpp:func:`polycpp::express::Response::cookie` (write). Both are
   thin wrappers over the ``polycpp/cookie`` companion.

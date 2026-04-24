@@ -79,7 +79,7 @@ What just happened
 
 2. ``app.use(json())`` installs the JSON body parser as middleware.
    It runs on every request; when it sees ``content-type:
-   application/json`` it fills :cpp:func:`polycpp::express::Request::body`
+   application/json`` it fills :cpp:member:`polycpp::express::Request::body`
    with a :cpp:class:`polycpp::JsonValue`.
 
 3. ``app.get("/hello/:name", ...)`` registers a route. Path patterns
